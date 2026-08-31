@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>dev.vexelray.designer</groupId>
+    <artifactId>vexelray-designer</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+
+    <name>vexelray-designer</name>
+    <description>
+        A parametric SDF design tool on vexelray-gui: an object/modifier tree in one window, a ray-marched
+        viewport in another. Standalone client app - depends on the framework from the local Maven repo and
+        selects its platform modules via OS-activated profiles, the same shape as calculator-vexel-demo.
+    </description>
+
+    <properties>
+        <maven.compiler.release>25</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+        <vexelray-gui.version>0.1.0-SNAPSHOT</vexelray-gui.version>
+        <vexelray.version>0.1.0-SNAPSHOT</vexelray.version>
+        <tactroller.version>1.0-SNAPSHOT</tactroller.version>
+
+        <app.mainClass>dev.vexelray.designer.DesignerApp</app.mainClass>
+        <!-- Program args for exec:exec (one token each; empty = interactive). -->
+        <app.args></app.args>
+        <app.args2></app.args2>
+        <app.args3></app.args3>
+        <wake.trace>false</wake.trace>
+    </properties>
+
+    <dependencies>
+        <!-- The framework: nodes, layout, dispatch, windows, and the widgets (TreeView above all). -->
+        <dependency>
+            <groupId>dev.vexelray.gui</groupId>
+            <artifactId>vexelray-gui-widget</artifactId>
+            <version>${vexelray-gui.version}</version>
+        </dependency>
+        <!-- Pictures: the grid overlay on the viewport is marks in a box, not two hundred floating nodes. -->
+        <dependency>
+            <groupId>dev.vexelray.gui</groupId>
+            <artifactId>vexelray-gui-draw</artifactId>
+            <version>${vexelray-gui.version}</version>
+        </dependency>
+        <!-- Camera. The march takes its eye from here and so does the grid overlay, which is what makes the
+             two agree by construction rather than by two derivations that happen to match. -->
+        <dependency>
+            <groupId>dev.vexelray.gui</groupId>
+            <artifactId>vexelray-gui-plot</artifactId>
+            <version>${vexelray-gui.version}</version>
+        </dependency>
+        <!-- The surface compiler and the ray-march composer. Brings vexelray-surface and vexelray-ir behind it. -->
+        <dependency>
+            <groupId>dev.vexelray</groupId>
+            <artifactId>vexelray-technique-sdf</artifactId>
+            <version>${vexelray.version}</version>
+        </dependency>
+        <!-- Input at the application edge: the tactroller->atchung bridge. -->
+        <dependency>
+            <groupId>sibarum.tactroller</groupId>
+            <artifactId>tactroller-atchung</artifactId>
+            <version>${tactroller.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>sibarum.tactroller</groupId>
+            <artifactId>tactroller-clipboard</artifactId>
+            <version>${tactroller.version}</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+                <configuration>
+                    <target>${maven.compiler.release}</target>
+                    <release>${maven.compiler.release}</release>
+                </configuration>
+            </plugin>
+            <!-- Run: mvn compile exec:exec ; headless capture: mvn compile exec:exec "-Dapp.args=[dash][dash]capture" -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.5.0</version>
+                <configuration>
+                    <executable>${java.home}/bin/java</executable>
+                    <classpathScope>runtime</classpathScope>
+                    <arguments>
+                        <argument>--enable-native-access=ALL-UNNAMED</argument>
+                        <argument>-Dvexelray.wake.trace=${wake.trace}</argument>
+                        <argument>-classpath</argument>
+                        <classpath/>
+                        <argument>${app.mainClass}</argument>
+                        <argument>${app.args}</argument>
+                        <argument>${app.args2}</argument>
+                        <argument>${app.args3}</argument>
+                    </arguments>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <!-- Build-time platform selection, same as vexelray-gui-demo and calculator-vexel-demo. -->
+        <profile>
+            <id>platform-windows</id>
+            <activation><os><family>windows</family></os></activation>
+            <dependencies>
+                <dependency>
+                    <groupId>dev.vexelray</groupId>
+                    <artifactId>vexelray-os-windows</artifactId>
+                    <version>${vexelray.version}</version>
+                    <scope>runtime</scope>
+                </dependency>
+                <dependency>
+                    <groupId>sibarum.tactroller</groupId>
+                    <artifactId>tactroller-windows</artifactId>
+                    <version>${tactroller.version}</version>
+                    <scope>runtime</scope>
+                </dependency>
+            </dependencies>
+        </profile>
+        <profile>
+            <id>platform-linux</id>
+            <activation><os><family>unix</family><name>linux</name></os></activation>
+            <dependencies>
+                <dependency>
+                    <groupId>dev.vexelray</groupId>
+                    <artifactId>vexelray-os-linux</artifactId>
+                    <version>${vexelray.version}</version>
+                    <scope>runtime</scope>
+                </dependency>
+                <dependency>
+                    <groupId>sibarum.tactroller</groupId>
+                    <artifactId>tactroller-linux</artifactId>
+                    <version>${tactroller.version}</version>
+                    <scope>runtime</scope>
+                </dependency>
+            </dependencies>
+        </profile>
+        <profile>
+            <id>platform-macos</id>
+            <activation><os><family>mac</family></os></activation>
+            <dependencies>
+                <dependency>
+                    <groupId>dev.vexelray</groupId>
+                    <artifactId>vexelray-os-macos</artifactId>
+                    <version>${vexelray.version}</version>
+                    <scope>runtime</scope>
+                </dependency>
+                <dependency>
+                    <groupId>sibarum.tactroller</groupId>
+                    <artifactId>tactroller-macos</artifactId>
+                    <version>${tactroller.version}</version>
+                    <scope>runtime</scope>
+                </dependency>
+            </dependencies>
+        </profile>
+    </profiles>
+</project>
