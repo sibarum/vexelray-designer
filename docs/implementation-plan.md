@@ -53,6 +53,15 @@ one makes a stage more expensive.
    values, not just `Surface` numerics.
 7. **`Surface.shaderKey()`** — the parameter-erasing normal form of R1.2: each `Param` contributes its slot and
    range, never its value. `ShaderKey` is built from this instead of from raw structural equality.
+8. **`Implicit` is screened for foreign push-constant reads**, and this one is not optional (R1.3). Steps 1–7
+   parameterise `Surface`'s *numeric fields*, but `Implicit(Expr f)` admits arbitrary IR — including an
+   `Expr.PushConstantRead` against a block the composer never issued. Measured today, that case **compiles
+   without complaint**: the foreign block's members are never emitted, the block stays the camera's six, and
+   only the member *index* survives, so a read of member 0 silently becomes a read of `camX`. The existing
+   bounds check does not catch it, because the index is validated against the foreign block rather than the
+   emitted one. So the lowering must walk an `Implicit`'s expression and reject any `PushConstantRead` whose
+   block is not the one `ParamBlock` issued — by name (R12). A parameter inside an `Implicit` is spelled as a
+   `Param` like everywhere else.
 
 **Cap**: `(128 − 28) / 4 = 25` parameters. Exceeding it throws by name (R12) and points at P0b.
 
@@ -61,6 +70,12 @@ one makes a stage more expensive.
 - 200-value sweep issues one `vkCreateGraphicsPipelines` and 200 push-constant writes (R1 acceptance).
 - Range validation: `Sphere` with a radius range spanning zero fails at construction.
 - `spirv-val` on a parametric scene, as S1 already does for constant ones.
+- **Block-member count**: a scene with `n` parameters emits a push block with `n + 7` members (six camera plus
+  `focalLength`). `tools/bench/PushStruct.java` already parses this out of the composed module and is the
+  regression test for step 8 — it currently reports `6` for every scene, which is the bug it was written to
+  find.
+- **A foreign block is refused**: `Implicit` reading from a `PushConstants` the composer did not issue fails by
+  name rather than composing. `tools/bench/ParamImplicit.java` is the reproduction.
 
 ### P0b — the parameter buffer *(deferred until a design exceeds 25)*
 

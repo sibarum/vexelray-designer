@@ -107,6 +107,69 @@ its own, ahead of any GPU.
 **Acceptance**: sweeping a parameter across 200 values compiles exactly one pipeline and issues 200
 push-constant writes; and `key(withValue(s, v1)).equals(key(withValue(s, v2)))` for every `v1`, `v2` in range.
 
+### 1.3 What a pressure test found: three risks cleared, one hard constraint
+
+R1 was probed against the live compiler before being committed to, because it looked like the kind of change
+that could quietly invalidate the Lipschitz tracking everything else rests on. **It does not.** Three results,
+all reproducible from [`tools/bench`](../tools/bench):
+
+**The bound does not depend on any parameter value.** `ParamProbe` lowers all thirteen numeric-carrying node
+kinds at values `0.5, 1, 2, 3` and reads `Field.lipschitz` back: it is `1.000` in every cell of the table. That
+is structural rather than lucky — every bound in `SurfaceCompiler` is a constant (`Field.exact`), a passthrough
+(`inner.lipschitz()`), or a `max` over children. Where a numeric could have entered, the arithmetic absorbs it
+instead: `Scale` multiplies the distance by its factor and keeps the child's bound, and `deform` divides by
+`twistStretch`/`bendStretch` and keeps the child's bound. **No numeric is ever an input to the bound**, so
+parameterising them threatens nothing.
+
+**Domain transforms and the gradient already cope.** A parameter leaf is not `Ir.POINT`, so `Substitute` passes
+it through untouched — `Twist(Translate(parameterised sphere))` lowers to a marchable field with bound `1.0`.
+And `Gradient` already carries the case: `Expr.PushConstantRead → Ir.zero(...)`, correct because a parameter is
+constant with respect to the sample point. An `Implicit` containing a parameter differentiates correctly today,
+with no change at all.
+
+**`Fold` is the whole cost, and §1.1 is right about where it lands.** A parameter cannot be constant-folded, so
+a node whose literal form folds away pays full price once parameterised (`FoldProbe`, over a plain box at
+5,888 B):
+
+| | folded | generic |
+|---|---|---|
+| `Translate` | identity is free | +224 B |
+| `Scale` | identity is free | +212 B |
+| `Rotate` | axis-aligned 6,816 B | generic axis + angle 7,952 B |
+
+That last row is §1.1's Rodrigues point with a number on it: a parameterised angle costs about 1.1 KB over an
+axis-aligned constant one. In practice this is close to free — a user dragging a slider is already at some
+arbitrary value, so the literal form was already unfolded. Only nodes sitting *exactly* at an identity lose
+anything, and those are nodes the user could have deleted. Against R2's multiplicative blowup it is noise.
+
+#### The hard constraint: the composer owns the push-constant block
+
+**A `Surface` must not declare its own `PushConstants` block.** This is the trap, and it fails silently.
+
+Vulkan permits one push-constant block per stage, and `SdfComposer` has already spent it on the camera's six
+floats (`camX, camY, camZ, yaw, pitch, aspect`). Composing a scene whose `Implicit` reads from an
+*independently declared* block succeeds — no error, no warning — and `PushStruct` shows why that is worse than
+failing: the emitted struct still has exactly **6 members**, the camera's. The foreign block's members are never
+emitted at all. Only the member *index* survives, and it re-indexes into the composer's block.
+
+So a parameter declared as member 0 compiles into a read of **`camX`**. The module is structurally valid, emits
+one push-constant variable as it should, renders — and the radius changes when the camera orbits.
+
+The bounds check makes this worse rather than better: the index is validated against the *foreign* block's
+member list, so member 5 of a 1-member block is rejected while member 0 sails through into the wrong block.
+The check sits at the wrong level to catch the actual error.
+
+**Therefore**: parameters must be **collected by the composer** from the `Surface` tree and appended to the
+block it already owns, with the resulting layout published back to the application. They cannot be declared
+bottom-up by the nodes that use them — which also means §1.2's parameter-erasing normal form needs a companion
+*collection* pass, walking the tree in a defined order so that two structurally equal scenes assign the same
+member index to the same parameter.
+
+**Acceptance for this half**: a scene declaring `n` parameters emits a push block with `n` members more than
+the reserved camera prefix — `6 + n` as the block stands today, `7 + n` once R8 folds `focalLength` into it;
+and composing a `Surface` that reads from a block the composer did not issue is **rejected by name**, not
+silently aliased. `PushStruct` reports `6` for every scene today, which is the measurement that found this.
+
 ---
 
 ## 2. R2 — Stacking operators must not multiply the shader
@@ -502,6 +565,18 @@ cd ../calculator-vexel-demo && mvn -q -o dependency:build-classpath -Dmdep.outpu
 javac -cp "$(cat cp.txt)" -d . ../vexelray-designer/tools/bench/Ladder.java
 java -cp ".;$(cat cp.txt)" Ladder
 ```
+
+The R1 pressure test of §1.3 is four more of the same shape, each standalone and GPU-free:
+
+| probe | asks |
+|---|---|
+| `ParamProbe` | does `Field.lipschitz` vary with a node's parameter value? (it does not) |
+| `FoldProbe` | what does `Fold` buy at identity values — i.e. what a parameter gives up |
+| `ParamImplicit` | does a parameterised `Implicit` lower, differentiate, and survive a domain transform? |
+| `PushStruct` | how many members does the emitted push-constant block actually have? |
+
+`PushStruct` is the one worth running first: it parses the composed SPIR-V and counts the push block's members,
+which is how the silent aliasing in §1.3 was found rather than reasoned about.
 
 `ComposeBench.java` beside it covers the individual node kinds, including the gyroid
 `sin x cos y + sin y cos z + sin z cos x` with a declared bound (5.8 KB) against the same gyroid with a derived
