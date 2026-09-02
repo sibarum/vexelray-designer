@@ -38,6 +38,9 @@ public final class DesignerApp {
     private static final int W = 380;
     private static final int H = 620;
 
+    /** Toolbar buttons per row. Words need the width; glyphs would not have. */
+    private static final int PER_ROW = 4;
+
     private final Design design = new Design();
     private final Gui treeGui = new Gui();
     private final Gui viewGui = new Gui();
@@ -100,8 +103,8 @@ public final class DesignerApp {
         Node bar = viewGui.row().width(Length.FILL).gap(Length.rem(0.4f))
                 .padding(Length.dp(8))
                 .children(
-                        button(viewGui, "◧", "Grid", () -> viewport.grid(!viewport.grid())),
-                        button(viewGui, "⌂", "Home", () -> viewport.home()),
+                        button(viewGui, "Grid", "Show or hide the ground grid", () -> viewport.grid(!viewport.grid())),
+                        button(viewGui, "Home", "Back to the starting view", () -> viewport.home()),
                         viewGui.box().width(Length.grow(1)),
                         viewStatus);
 
@@ -135,8 +138,8 @@ public final class DesignerApp {
                 showProperties(item);
             })
             .onContextMenu((item, menu) -> {
-                menu.item("✕", "Delete", true, () -> design.remove(item));
-                menu.item("⧉", "Duplicate", true, () -> design.add(item.copy(), item.parent()));
+                menu.item("", "Delete", true, () -> design.remove(item));
+                menu.item("", "Duplicate", true, () -> design.add(item.copy(), item.parent()));
             });
 
         design.onChange(() -> {
@@ -164,25 +167,30 @@ public final class DesignerApp {
     }
 
     /**
-     * The toolbar: two rows of glyph buttons, primitives over modifiers.
+     * The toolbar: named buttons, four to a row — primitives, then booleans, then deformers, which is the order
+     * they are reached for.
      *
-     * <p>Every glyph is one the text atlas actually carries — the boolean operators are real Unicode
-     * ({@code ∪ ∩ ∖}) and so are the shapes, which is why this needs no icon sheet. A glyph the atlas is
-     * missing renders as a box, so the set is chosen rather than invented.
+     * <p>Four rather than eight because these are words. See {@link Item.Kind} for why they are words: the
+     * glyphs this originally used are absent from the atlas and drew as boxes, every one of them.
      */
     private Node toolbar() {
-        Node primitives = treeGui.row().width(Length.FILL).gap(Length.rem(0.3f));
-        Node modifiers = treeGui.row().width(Length.FILL).gap(Length.rem(0.3f));
+        Node rows = treeGui.column().width(Length.FILL).gap(Length.rem(0.3f));
+        Node row = null;
+        int n = 0;
         for (Item.Kind kind : Item.Kind.values()) {
-            Node b = button(treeGui, kind.glyph, kind.label, () -> addKind(kind));
-            if (kind.group) {
-                modifiers.append(b);
-            } else {
-                primitives.append(b);
+            if (n % PER_ROW == 0) {
+                row = treeGui.row().width(Length.FILL).gap(Length.rem(0.3f));
+                rows.append(row);
             }
+            row.append(button(treeGui, kind.tag, kind.label, () -> addKind(kind))
+                    .width(Length.grow(1)));
+            n++;
         }
-        return treeGui.column().width(Length.FILL).gap(Length.rem(0.3f))
-                .children(primitives, modifiers);
+        // A last row with fewer buttons would stretch them; a spacer keeps every button one quarter wide.
+        for (int pad = n % PER_ROW; pad > 0 && pad < PER_ROW; pad++) {
+            row.append(treeGui.box().width(Length.grow(1)));
+        }
+        return rows;
     }
 
     /**
@@ -196,7 +204,7 @@ public final class DesignerApp {
         design.add(new Item(kind), parent);
     }
 
-    private Node button(Gui gui, String glyph, String tip, Runnable action) {
+    private Node button(Gui gui, String face, String tip, Runnable action) {
         Node b = gui.box()
                 .padding(Length.dp(6))
                 .corner(Length.rem(0.35f))
@@ -204,7 +212,7 @@ public final class DesignerApp {
                 .border(Length.rem(0.08f), gui.theme().color(Role.LINE))
                 .lit(true)
                 .elevation(Length.rem(0.2f))
-                .children(gui.text(glyph).textSize(Length.rem(1.0f))
+                .children(gui.text(face).textSize(Length.rem(0.75f))
                         .textColor(gui.theme().color(Role.INK)));
         gui.onClick(b, action);
         gui.onState(b, s -> b.background(gui.theme().color(Role.PANEL, s)));
@@ -240,7 +248,7 @@ public final class DesignerApp {
         if (item == null) {
             return;
         }
-        Node heading = treeGui.text(item.kind.glyph + "  " + item.name())
+        Node heading = treeGui.text(item.name())
                 .textSize(Length.rem(0.85f))
                 .textColor(treeGui.theme().color(Role.INK));
         properties.append(heading);
@@ -309,7 +317,7 @@ public final class DesignerApp {
 
         @Override
         public String label(Item item) {
-            return item.kind.glyph + "  " + item.name();
+            return item.name();
         }
 
         @Override

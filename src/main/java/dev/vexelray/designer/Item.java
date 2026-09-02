@@ -22,30 +22,49 @@ import java.util.Map;
  */
 final class Item {
 
-    /** What an item is. The glyph is its toolbar and tree icon, and every one is in the text atlas. */
+    /**
+     * What an item is: a full {@code label} for the tree and the tooltip, and a short {@code tag} for a button
+     * narrow enough to sit four to a row.
+     *
+     * <h2>Why these are words and not glyphs</h2>
+     * The first version used Unicode marks — {@code ∪ ∩ ∖} for the booleans, geometric shapes for the
+     * primitives — on the reasoning that the atlas's charset in {@code vexelray-text/pom.xml} asks for the
+     * math-operator, arrow, geometric-shape and dingbat blocks. It asks, and it does not get them: the charset
+     * is a request, and {@code msdf-atlas-gen} can only rasterise what the <em>font</em> has. NotoSans-Regular
+     * carries Latin, Greek, Cyrillic, punctuation, currency and the letterlike block — and above {@code U+2000}
+     * the generated atlas holds exactly General Punctuation, currency, Letterlike, {@code U+2212} (minus),
+     * {@code U+25CC} and {@code U+FFFD}. Every one of those marks was absent, so every one drew as a fallback
+     * box.
+     *
+     * <p>{@code calculator-vexel-demo}'s README states this outright — "of the mathematical operators exactly
+     * one, the minus sign ... a missing glyph renders as a box" — so the constraint was written down before this
+     * was built. Words are the reliable answer, and for an unfamiliar vocabulary they are the clearer one too.
+     * Drawn icons are the real upgrade: {@code vexelray-gui-draw}'s four operations are enough for these shapes,
+     * cost no atlas, and scale — see docs/icons.md.
+     */
     enum Kind {
-        SPHERE("Sphere", "●", false),
-        BOX("Box", "■", false),
-        TORUS("Torus", "◆", false),
-        CAPSULE("Capsule", "▮", false),
+        SPHERE("Sphere", "Sphere", false),
+        BOX("Box", "Box", false),
+        TORUS("Torus", "Torus", false),
+        CAPSULE("Capsule", "Capsule", false),
 
-        UNION("Union", "∪", true),
-        BLEND("Blend", "⊕", true),
-        DIFFERENCE("Difference", "∖", true),
-        INTERSECTION("Intersection", "∩", true),
+        UNION("Union", "Union", true),
+        BLEND("Blend", "Blend", true),
+        DIFFERENCE("Difference", "Diff", true),
+        INTERSECTION("Intersection", "Inter", true),
 
-        TWIST("Twist", "↻", true),
-        BEND("Bend", "↝", true),
-        ARRAY("Array", "▦", true),
-        MIRROR("Mirror", "◧", true);
+        TWIST("Twist", "Twist", true),
+        BEND("Bend", "Bend", true),
+        ARRAY("Array", "Array", true),
+        MIRROR("Mirror", "Mirror", true);
 
         final String label;
-        final String glyph;
+        final String tag;
         final boolean group;
 
-        Kind(String label, String glyph, boolean group) {
+        Kind(String label, String tag, boolean group) {
             this.label = label;
-            this.glyph = glyph;
+            this.tag = tag;
             this.group = group;
         }
     }
