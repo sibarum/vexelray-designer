@@ -98,6 +98,28 @@ final class Viewport {
     /** Latest-wins guard, so a burst of edits composes once rather than a dozen times. */
     private final AtomicInteger revision = new AtomicInteger();
 
+    /**
+     * The machine-readable state of the view: an invisible node whose <b>name is the phase</b>, as
+     * {@code view <n> <phase>}.
+     *
+     * <p>This exists because {@code settle} cannot see either half of getting a picture here. A scene change is
+     * lowered and composed on a worker, and the march runs from the frame loop because
+     * {@code SampledColorTarget.renderInto} submits to a {@code VkQueue} — and neither is a mutation the loop is
+     * owed, so nothing reports it owed. {@code settle} is exact about the frame loop and blind to work in
+     * flight, and says so.
+     *
+     * <p><b>The number is the load-bearing part.</b> Waiting for {@code marched} alone is satisfied the instant
+     * it is asked, because what this node said before the request is that the <em>previous</em> scene marched —
+     * so a driver would photograph the old picture under the new heading and be told it succeeded. A driver
+     * reads the revision, acts, then waits for the next one. That is the trap
+     * {@code calculator-vexel-demo/docs/driving-the-preview.md} records getting wrong three times running while
+     * every number on the status line was correct.
+     */
+    private final Node state;
+
+    /** What has already been announced, so a camera-only frame does not re-announce the same march. */
+    private volatile String announcedState = "";
+
     private Camera camera = Camera.DEFAULT;
     private double distance = BASE_DISTANCE;
 
@@ -109,6 +131,9 @@ final class Viewport {
                 .background(Color.rgb(0.09f, 0.10f, 0.13f))
                 .corner(Length.rem(0.4f))
                 .clip(true);
+        // Zero-height and hidden: the semantic snapshot describes hidden subtrees rather than skipping them, so
+        // its name is published and legible while nothing about the window changes.
+        this.state = gui.text("view 0 idle").visible(false).height(Length.ZERO);
         gui.onDrag(canvas, this::drag);
         // Turning is a displacement, so the pointer is held for the gesture and warped back each frame.
         gui.dragLocksPointer(canvas, true);
@@ -130,6 +155,23 @@ final class Viewport {
         return canvas;
     }
 
+    /** The readiness node, for the host to landmark. Hidden, zero-height, and in the tree on purpose. */
+    Node stateNode() {
+        return state;
+    }
+
+    /**
+     * Announce a phase against the current revision. Safe from any thread: a {@link Node} setter posts a
+     * mutation and the GUI thread applies it, which is the ordinary way to write to one.
+     */
+    private void publish(String phase) {
+        String next = "view " + revision.get() + " " + phase;
+        if (!next.equals(announcedState)) {
+            announcedState = next;
+            state.text(next);
+        }
+    }
+
     /** Remembered so {@link #pump()} can mint a target; the device is not public and this is how it is reached. */
     void attach(GuiApp app) {
         this.app = app;
@@ -143,6 +185,7 @@ final class Viewport {
      */
     void show(Surface surface) {
         int mine = revision.incrementAndGet();
+        publish("requested");
         gui.async(() -> {
             if (revision.get() == mine) {
                 showNow(surface);
@@ -171,6 +214,7 @@ final class Viewport {
             this.sceneDirty = true;
             this.frameDirty = true;
             report = String.format("%,d B in %.0f ms", fs.length, ms);
+            publish("composed " + fs.length);
             System.out.println("composed: " + report);
             status.accept(report);
         } catch (Throwable t) {
@@ -178,6 +222,7 @@ final class Viewport {
             // by stacking modifiers. Say so and keep the last good picture rather than dying.
             String m = t.getMessage();
             status.accept("cannot compile: " + (m == null ? t.getClass().getSimpleName() : m));
+            publish("refused");
         }
     }
 
@@ -362,13 +407,33 @@ final class Viewport {
             return;
         }
         frameDirty = false;
+        SdfScene.Rgb bg = sky;
+        target.renderInto(pipeline, 0L, 0L, 3, cameraBytes((double) w / h),
+                (float) bg.r(), (float) bg.g(), (float) bg.b(), 1f);
+        // Announced only after the submission returns. renderInto waits for its own work, so by here the image
+        // really is in SHADER_READ_ONLY and the next presented frame samples it. Announcing before the call
+        // would tell a driver the picture was on the glass while the march had not run — the exact lie this
+        // node exists to prevent, and one that a photograph taken on the strength of it would not reveal.
+        publish("marched " + target.width() + "x" + target.height());
         if (!announced) {
             announced = true;
             System.out.println("marched " + target.width() + "x" + target.height() + " into a viewport");
         }
-        SdfScene.Rgb bg = sky;
-        target.renderInto(pipeline, 0L, 0L, 3, cameraBytes((double) w / h),
-                (float) bg.r(), (float) bg.g(), (float) bg.b(), 1f);
+    }
+
+    /**
+     * Release the pipeline this viewport built. <b>Render thread only</b>, and after the loop has stopped.
+     *
+     * <p>The probe's resource ledger is what asked for this: a run reported {@code GraphicsPipeline opened 3,
+     * closed 2, LIVE 1}, because {@link #ensurePipeline} closes the pipeline it <em>replaces</em> and nothing
+     * closed the last one. The target is deliberately not closed here — {@code GuiApp} minted every one and
+     * closes them all, and {@code SampledColorTarget.close()} is not idempotent.
+     */
+    void close() {
+        if (pipeline != null) {
+            pipeline.close();
+            pipeline = null;
+        }
     }
 
     /** @return whether a new target was minted, which means the node has to be pointed at it. */

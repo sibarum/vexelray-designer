@@ -63,12 +63,17 @@ final class Design {
     }
 
     // --- edits, all of them undoable ---
+    //
+    // None of these announces the change itself. The Change returned by placing/setting does that from inside
+    // its own apply, which is the only place that knows the mutation actually happened - and it is also the
+    // path undo and redo take, so announcing here as well fired the listener twice for every edit. The
+    // automation drivers caught it: one click on Sphere took the view revision from 1 to 3, which is two
+    // lowerings and two pipeline builds for one added sphere.
 
     /** Add {@code item} under {@code parent} (or the root), at the end. */
     void add(Item item, Item parent) {
         Item into = parent == null || !parent.canHoldChildren() ? root : parent;
         history.perform(placing(item, into, into.children().size()));
-        changed();
     }
 
     void remove(Item item) {
@@ -76,13 +81,11 @@ final class Design {
             return;
         }
         history.perform(placing(item, null, 0));
-        changed();
     }
 
     /** Toggle visibility. Undoable, because hiding a branch is an edit like any other. */
     void visible(Item item, boolean visible) {
         history.perform(setting(item, visible));
-        changed();
     }
 
     /**
@@ -99,12 +102,10 @@ final class Design {
 
     void undo() {
         history.undo();
-        changed();
     }
 
     void redo() {
         history.redo();
-        changed();
     }
 
     /**

@@ -28,10 +28,49 @@
         <app.args></app.args>
         <app.args2></app.args2>
         <app.args3></app.args3>
+        <!-- Diagnostics: mvn compile exec:exec "-Dwake.trace=true" traces every frame-loop wake. -->
         <wake.trace>false</wake.trace>
+
+        <!--
+          Profiling: verbose on demand, across the whole stack. See sibarum.probe.Probe and
+          atchung/docs/probe.md.
+
+            mvn compile exec:exec -Pprofiler                      everything, rollup every 2s, slow frames named
+            mvn compile exec:exec "-Dprobe=frame,gpu,shader"      three lanes only
+            mvn compile exec:exec -Pprofiler "-Dprobe.out=run.log"  to a file instead of stdout
+
+          Lanes: bus state time anim input frame layout draw gpu shader app. For this application `shader` and
+          `gpu` are the two that matter - a scene change is a lowering and a pipeline build, and that is the
+          cost R1 and R4 exist to remove, so it should be measured rather than argued about.
+
+          Every one is also an environment variable - PROBE, PROBE_OUT, PROBE_TRACE, PROBE_EVERY, PROBE_SLOW,
+          PROBE_STACKS - which works identically on every OS and needs no Maven.
+        -->
+        <probe>off</probe>
+        <probe.out></probe.out>
+        <probe.trace>false</probe.trace>
+        <probe.every>0</probe.every>
+        <probe.slow>0</probe.slow>
+        <probe.stacks>false</probe.stacks>
+        <probe.format>text</probe.format>
+
+        <!--
+          The automation driver: "off", "on" for the default port, or a port number. The tree window takes the
+          port named and the viewport window the one above it, because a marched picture cannot be checked by
+          reading numbers and each driver is bound to its own Gui tree.
+          See vexelray-gui/docs/automation.md and docs/driving-the-viewport.md.
+        -->
+        <automation>off</automation>
     </properties>
 
     <dependencies>
+        <!-- Driving the running app the way a person does: real window, real Vulkan, real frame loop. A
+             troubleshooting instrument, not a shipped feature - see vexelray-gui/docs/automation.md. -->
+        <dependency>
+            <groupId>dev.vexelray.gui</groupId>
+            <artifactId>vexelray-gui-automation</artifactId>
+            <version>${vexelray-gui.version}</version>
+        </dependency>
         <!-- The framework: nodes, layout, dispatch, windows, and the widgets (TreeView above all). -->
         <dependency>
             <groupId>dev.vexelray.gui</groupId>
@@ -92,6 +131,14 @@
                     <arguments>
                         <argument>--enable-native-access=ALL-UNNAMED</argument>
                         <argument>-Dvexelray.wake.trace=${wake.trace}</argument>
+                        <argument>-Dprobe=${probe}</argument>
+                        <argument>-Dprobe.out=${probe.out}</argument>
+                        <argument>-Dprobe.trace=${probe.trace}</argument>
+                        <argument>-Dprobe.every=${probe.every}</argument>
+                        <argument>-Dprobe.slow=${probe.slow}</argument>
+                        <argument>-Dprobe.stacks=${probe.stacks}</argument>
+                        <argument>-Dprobe.format=${probe.format}</argument>
+                        <argument>-Dautomation=${automation}</argument>
                         <argument>-classpath</argument>
                         <classpath/>
                         <argument>${app.mainClass}</argument>
@@ -105,6 +152,16 @@
     </build>
 
     <profiles>
+        <!-- Everything, rolled up every two seconds, with slow frames named as they happen. -->
+        <profile>
+            <id>profiler</id>
+            <properties>
+                <probe>all</probe>
+                <probe.every>2000</probe.every>
+                <probe.slow>16</probe.slow>
+                <probe.stacks>true</probe.stacks>
+            </properties>
+        </profile>
         <!-- Build-time platform selection, same as vexelray-gui-demo and calculator-vexel-demo. -->
         <profile>
             <id>platform-windows</id>

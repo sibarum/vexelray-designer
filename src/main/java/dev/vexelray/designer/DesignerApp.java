@@ -3,6 +3,10 @@ package dev.vexelray.designer;
 import dev.vexelray.canvas.Color;
 import dev.vexelray.gui.core.Gui;
 import dev.vexelray.gui.core.Node;
+import dev.vexelray.gui.automation.Automation;
+import dev.vexelray.gui.automation.AutomationServer;
+import dev.vexelray.gui.core.WindowControls;
+import dev.vexelray.gui.core.app.AppWindow;
 import dev.vexelray.gui.core.app.GuiApp;
 import dev.vexelray.gui.core.app.WindowSpec;
 import dev.vexelray.gui.core.layout.Length;
@@ -20,6 +24,7 @@ import sibarum.tactroller.api.CoordinateSpace;
 import sibarum.tactroller.api.Tactroller;
 import sibarum.tactroller.atchung.TactrollerInputBridge;
 
+import java.io.IOException;
 import java.util.List;
 
 /**
@@ -41,6 +46,22 @@ public final class DesignerApp {
     /** Toolbar buttons per row. Words need the width; glyphs would not have. */
     private static final int PER_ROW = 4;
 
+    /**
+     * The landmarks this application publishes — its contract with an automation driver.
+     *
+     * <p>Constants rather than literals at the call site, because a landmark is the durable half of the
+     * automation surface: a ref is a node id minted per run, so a script that clicks ref 41 cannot be replayed
+     * tomorrow, while a landmark can also be <em>navigated</em> to, so a concealed target is revealed rather
+     * than refused. Naming them here makes renaming one visibly a breaking change.
+     */
+    static final String TOOLBAR = "toolbar";
+    static final String TREE = "tree";
+    static final String PROPERTIES = "properties";
+    static final String STATUS = "status";
+    static final String VIEW = "view";
+    static final String VIEW_STATUS = "view.status";
+    static final String VIEW_STATE = "view.state";
+
     private final Design design = new Design();
     private final Gui treeGui = new Gui();
     private final Gui viewGui = new Gui();
@@ -53,6 +74,12 @@ public final class DesignerApp {
     private Node properties;
     private final java.util.List<Node> propertyRows = new java.util.ArrayList<>();
     private Node viewStatus;
+
+    /**
+     * The viewport window's real controls, handed down by {@code WindowSpec.onControls} when the window opens.
+     * {@link WindowControls#NONE} until then, because the driver starts before the frame loop creates it.
+     */
+    private volatile WindowControls viewControls = WindowControls.NONE;
 
     public static void main(String[] args) throws Exception {
         boolean capture = List.of(args).contains("--capture");
@@ -75,22 +102,80 @@ public final class DesignerApp {
             // outlives every open/close cycle, so closing and reopening it returns it as it was left.
             // Opened under --capture too, because a viewport that is never laid out is never marched, and a
             // bounded run that skipped it would prove only that the program can start.
-            app.window("viewport",
-                    () -> WindowSpec.of(WindowConfig.of("Viewport", 900, 640), viewGui)).show();
+            // onControls, not WindowControls.of(nativeWindow). A native window cannot photograph itself — the
+            // pixels come from the GUI's per-window render bundle, which only the host owns — so controls
+            // minted from the handle get a working minimize and close and a screenshot that silently does
+            // nothing. The framework hands the real set down here for exactly that reason, and it is worth the
+            // indirection: `shot` on the viewport driver is the only way to see what was marched.
+            AppWindow view = app.window("viewport",
+                    () -> WindowSpec.of(WindowConfig.of("Viewport", 900, 640), viewGui)
+                            .onControls(c -> viewControls = c));
+            view.show();
 
+            // Two drivers, each bound to its own Gui tree, so `tree` on the first does not list the viewport
+            // and `shot` on it photographs the wrong window. The viewport is on the port above, and it is the
+            // one that matters: a marched picture cannot be checked by reading numbers off a status line.
+            //
+            // The viewport's controls are resolved at command time rather than captured here, because a named
+            // window's OS window does not exist until the frame loop creates it and the driver starts first.
+            try (AutomationServer treeDriver = openDriver(treeGui, app.controls(), 0);
+                 AutomationServer viewDriver = openDriver(viewGui, delegatingViewControls(), 1)) {
             TactrollerInputBridge bridge =
                     input == null ? null : new TactrollerInputBridge(input, treeGui.bus());
 
-            app.run(treeGui, maxFrames, () -> {
-                pump(bridge);
-                // The march does its GPU work here and nowhere else: this hook runs on the presenting thread,
-                // and the device queue belongs to it.
-                viewport.pump();
-            });
+            try {
+                app.run(treeGui, maxFrames, () -> {
+                    pump(bridge);
+                    // The march does its GPU work here and nowhere else: this hook runs on the presenting
+                    // thread, and the device queue belongs to it.
+                    viewport.pump();
+                });
+            } finally {
+                // The loop has stopped, so this is still the render thread and nothing else holds the
+                // pipeline. Without it the probe's ledger reports one GraphicsPipeline live at exit.
+                viewport.close();
+            }
+            }
         }
         treeGui.close();
         viewGui.close();
         System.out.println("clean shutdown");
+    }
+
+    /**
+     * Controls that read {@link #viewControls} at command time rather than capturing it.
+     *
+     * <p>The driver is constructed before the frame loop runs, so the window it photographs does not exist
+     * yet; and a named window closed and reopened is handed a fresh set. Both are reasons to look the current
+     * one up per command instead of holding one.
+     */
+    private WindowControls delegatingViewControls() {
+        return new WindowControls() {
+            @Override
+            public void capture(String path) {
+                viewControls.capture(path);
+            }
+
+            @Override
+            public void minimize() {
+                viewControls.minimize();
+            }
+
+            @Override
+            public void toggleMaximize() {
+                viewControls.toggleMaximize();
+            }
+
+            @Override
+            public boolean maximized() {
+                return viewControls.maximized();
+            }
+
+            @Override
+            public void close() {
+                viewControls.close();
+            }
+        };
     }
 
     // --- the viewport window ---
@@ -111,7 +196,14 @@ public final class DesignerApp {
         viewGui.root()
                 .background(viewGui.theme().color(Role.PAGE))
                 .padding(Length.dp(8)).gap(Length.rem(0.4f))
-                .children(bar, viewport.node());
+                .children(bar, viewport.node(), viewport.stateNode());
+
+        // The canvas has to be named. It is a bare box with no role and no text, so it appears in no `tree`
+        // listing and matches no `find` — the subject of the whole window would be the one node in it that
+        // nothing could address. Drag targets go here.
+        viewGui.landmark(VIEW, viewport.node());
+        viewGui.landmark(VIEW_STATUS, viewStatus);
+        viewGui.landmark(VIEW_STATE, viewport.stateNode());
     }
 
     // --- the tree window ---
@@ -155,10 +247,16 @@ public final class DesignerApp {
                 .background(treeGui.theme().color(Role.WELL))
                 .corner(Length.rem(0.4f));
 
+        Node bar = toolbar();
         treeGui.root()
                 .background(treeGui.theme().color(Role.PAGE))
                 .padding(Length.dp(8)).gap(Length.rem(0.4f))
-                .children(toolbar(), tree.scroller(), properties, status);
+                .children(bar, tree.scroller(), properties, status);
+
+        treeGui.landmark(TOOLBAR, bar);
+        treeGui.landmark(TREE, tree.scroller());
+        treeGui.landmark(PROPERTIES, properties);
+        treeGui.landmark(STATUS, status);
 
         treeGui.shortcut(Key.Z, design::undo,
                 Modifier.CONTROL);
@@ -367,6 +465,30 @@ public final class DesignerApp {
     }
 
     // --- input plumbing ---
+
+    /**
+     * The automation driver for the tree window, or null when {@code -Dautomation} is off.
+     *
+     * <p>Behind a flag because it hands whoever reaches the socket full control of this application's input.
+     * {@code AutomationServer} binds loopback only and takes one connection at a time — a pointer is one hand —
+     * and neither is configurable: it is a troubleshooting instrument, not a service.
+     */
+    private static AutomationServer openDriver(Gui gui, WindowControls controls, int offset) {
+        String flag = System.getProperty("automation", "off").trim();
+        if (flag.isEmpty() || flag.equals("off")) {
+            return null;
+        }
+        int base = flag.equals("on") ? 7654 : Integer.parseInt(flag);
+        try {
+            AutomationServer server = AutomationServer.start(new Automation(gui, controls), base + offset);
+            System.out.println("automation: " + (offset == 0 ? "tree" : "viewport")
+                    + " listening on 127.0.0.1:" + server.port());
+            return server;
+        } catch (IOException | RuntimeException e) {
+            System.out.println("automation: could not listen -- " + e);
+            return null;
+        }
+    }
 
     /**
      * Drain the device into the bus. A backend that fails mid-drain drops the events it could not read rather
