@@ -182,7 +182,7 @@ public final class DesignerApp {
                 row = treeGui.row().width(Length.FILL).gap(Length.rem(0.3f));
                 rows.append(row);
             }
-            row.append(button(treeGui, kind.tag, kind.label, () -> addKind(kind))
+            row.append(button(treeGui, kind, kind.tag, kind.label, () -> addKind(kind))
                     .width(Length.grow(1)));
             n++;
         }
@@ -205,15 +205,43 @@ public final class DesignerApp {
     }
 
     private Node button(Gui gui, String face, String tip, Runnable action) {
-        Node b = gui.box()
+        return button(gui, null, face, tip, action);
+    }
+
+    /**
+     * A toolbar button: an optional drawn icon over its name.
+     *
+     * <p>The icon is a {@link dev.vexelray.gui.draw.Picture} on a fixed-size box, rebuilt from {@code onResizeUi}
+     * rather than authored once. A picture is in pixels — the renderer resolves no units of its own — so the only
+     * way it follows the UI zoom is to be redrawn for the box that was actually measured. {@code onResizeUi} is
+     * the right lane because the rebuild is a dozen marks and lands in the same frame as the layout it reacts to;
+     * a frame of lag here would show as an icon briefly the wrong size while a window is dragged.
+     */
+    private Node button(Gui gui, Item.Kind kind, String face, String tip, Runnable action) {
+        Node b = gui.column()
                 .padding(Length.dp(6))
+                .gap(Length.rem(0.15f))
                 .corner(Length.rem(0.35f))
                 .background(gui.theme().color(Role.PANEL))
                 .border(Length.rem(0.08f), gui.theme().color(Role.LINE))
                 .lit(true)
-                .elevation(Length.rem(0.2f))
-                .children(gui.text(face).textSize(Length.rem(0.75f))
-                        .textColor(gui.theme().color(Role.INK)));
+                .elevation(Length.rem(0.2f));
+        if (kind != null) {
+            Node art = gui.box().width(Length.rem(1.5f)).height(Length.rem(1.5f));
+            gui.onResizeUi(art, layout -> {
+                float w = layout.content().w();
+                float h = layout.content().h();
+                if (w > 1 && h > 1) {
+                    art.picture(Icons.of(kind, w, h,
+                            gui.theme().color(Role.INK),
+                            gui.theme().color(Role.FAINT),
+                            gui.theme().color(Role.PANEL)));
+                }
+            });
+            b.append(art);
+        }
+        b.append(gui.text(face).textSize(Length.rem(0.7f))
+                .textColor(gui.theme().color(Role.INK)));
         gui.onClick(b, action);
         gui.onState(b, s -> b.background(gui.theme().color(Role.PANEL, s)));
         tips.computeIfAbsent(gui, Tooltip::new).attach(b, tip);
