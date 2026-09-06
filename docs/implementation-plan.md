@@ -96,6 +96,33 @@ Measure the ceiling to be honest about it; use P0b to stop standing on it.
 - **A foreign block is refused**: `Implicit` reading from a `PushConstants` the composer did not issue fails by
   name rather than composing. `tools/bench/ParamImplicit.java` is the reproduction.
 
+**Landed** — `vexelray` `A slider is a write, and only a shape is a compile`. All eight steps, with three limits
+recorded by name and two things measured that were not expected:
+
+- **`Stroke`'s vertices join the rejections**, alongside `Rotate`'s axis and `Plane`'s normal, and for a
+  sharper reason than either: the guarantee that every vertex lies on the rendered centre line is kept by
+  solving each corner in Java against its neighbours' positions and radii (`Spine`), and driving them would
+  move that solve into the shader, per cone per march step.
+- **An `Implicit`'s expression cannot carry a parameter.** Step 8 said a parameter inside an `Implicit` is
+  spelled as a `Param` like everywhere else — it cannot be, because `Implicit` holds raw `core` IR and raw IR
+  has no way to spell one. The screen is built and refuses a foreign block by name; a driven implicit is driven
+  from outside, by parametric transforms around it. Giving it one of its own means a marker the compiler
+  substitutes, which is a decision about the IR rather than about this stage.
+- **The rejections are types, not runtime checks.** A `double` field cannot be handed a `Param`, so R12's "fail
+  by name" has nothing to fail: the call does not compile. Cheaper than a message.
+- **`PushStruct` now reads 7, 8, 10 and 32** for 0, 1, 3 and 25 parameters, against the flat `6` it reported for
+  every scene before. Both bugs it was written to find are closed, and it stays as their regression test.
+- **A driven domain transform pays its cost once per copy of the transformed point** — a parametric rotation
+  about `+Y` emits 24 trigonometric calls where it should emit 2, because a `Box` reads its point four times
+  and nothing downstream does CSE. A literal rotation duplicated nine constants, which is why this was never
+  visible. It is precisely what P1 step 1 removes, and it now has a test that will say so. **This is an
+  argument for P1 landing next rather than P0b.**
+
+Beyond the eight steps: `Bounds` does interval arithmetic over declared ranges, because a box computed from
+today's slider is a containment claim that expires when the slider moves — and a driven rotation reports the
+ball its corners sweep rather than a box that turns. `Viewport` carries values across a recompile by identity
+and pushes the whole block; what it does not yet have is any UI to move them, which is the next app-side piece.
+
 ### P0b — the parameter buffer *(with P0a, not deferred behind it)*
 
 Swap the block's backing from `PushConstants` to `Buffer` at descriptor set 0, `BufferLoad(block, slot)`. The

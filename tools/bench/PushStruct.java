@@ -1,40 +1,73 @@
 import dev.supirvast.vastir.core.Expr;
 import dev.supirvast.vastir.core.PushConstants;
 import dev.vexelray.ir.Ir;
+import dev.vexelray.surface.Scalar;
 import dev.vexelray.surface.Surface;
 import dev.vexelray.technique.sdf.SdfComposer;
 import dev.vexelray.technique.sdf.SdfScene;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
-/** Traces the push-constant block's struct: how many members does the emitted block actually have? */
+/**
+ * Traces the push-constant block's struct: how many members does the emitted block actually have?
+ *
+ * <p>Written to find a bug and kept as its regression test. Before P0a it reported <b>6 for every scene</b> —
+ * the camera's six — however many parameters a surface asked for, because an {@code Implicit} reading a
+ * push-constant block the composer never issued lowered to a read of the <em>emitted</em> block at the same
+ * member index. Member 0 of somebody's parameter block silently became {@code camX}, and nothing anywhere
+ * complained: the module was valid SPIR-V and passed {@code spirv-val}.
+ *
+ * <p>What it should now print: {@code 7} for a scene of literals (the camera plus the lens), {@code 7 + n} for
+ * a scene with {@code n} parameters, and a named refusal for the foreign block.
+ */
 public final class PushStruct {
 
     static final int OP_TYPE_STRUCT = 30, OP_TYPE_POINTER = 32, OP_VARIABLE = 59, OP_MEMBER_DECORATE = 72;
     static final int STORAGE_PUSH_CONSTANT = 9;
 
     public static void main(String[] args) {
-        report("camera only", new Surface.Sphere(0, 0, 0, 1));
+        report("camera and lens only", new Surface.Sphere(0, 0, 0, 1));
 
-        PushConstants one = PushConstants.of("radius", Ir.F32);
-        report("+ 1-member param block",
-                Surface.Implicit.bounded(Ir.sub(Ir.length(Ir.POINT), one.read(0)), 1.0));
+        report("+ 1 parameter", new Surface.Sphere(Scalar.of(0), Scalar.of(0), Scalar.of(0),
+                Scalar.Param.over(0.25, 2)));
 
-        PushConstants three = new PushConstants(java.util.List.of(
-                new PushConstants.Member("a", Ir.F32),
-                new PushConstants.Member("b", Ir.F32),
-                new PushConstants.Member("c", Ir.F32)));
-        report("+ 3-member param block",
-                Surface.Implicit.bounded(
-                        Ir.sub(Ir.length(Ir.POINT),
-                                Ir.add(Ir.add(three.read(0), three.read(1)), three.read(2))), 1.0));
+        report("+ 3 parameters", new Surface.Sphere(Scalar.of(0), Scalar.Param.over(0, 3),
+                Scalar.Param.over(-2, 2), Scalar.Param.over(0.25, 2)));
+
+        report("+ 25 parameters (the cap)", spheres(SdfComposer.MAX_PUSH_CONSTANT_PARAMS));
+        report("+ 26 parameters (over it)", spheres(SdfComposer.MAX_PUSH_CONSTANT_PARAMS + 1));
+
+        // The bug this file was written to find: a block the composer never issued. It is now refused by name
+        // rather than resolving to the camera.
+        PushConstants foreign = PushConstants.of("radius", Ir.F32);
+        report("+ a foreign block",
+                Surface.Implicit.bounded(Ir.sub(Ir.length(Ir.POINT), foreign.read(0)), 1.0));
+    }
+
+    /** A union of {@code n} spheres, each with a driven radius — one parameter apiece. */
+    static Surface spheres(int n) {
+        List<Surface> of = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            of.add(new Surface.Sphere(Scalar.of(i * 3), Scalar.of(0), Scalar.of(0),
+                    Scalar.Param.over(0.25, 2)));
+        }
+        return new Surface.Union(of);
     }
 
     static void report(String name, Surface s) {
-        int[] w = words(SdfComposer.fragmentSpirv(SdfScene.of(s)));
+        byte[] spirv;
+        try {
+            spirv = SdfComposer.fragmentSpirv(SdfScene.of(s));
+        } catch (IllegalArgumentException refused) {
+            System.out.printf("%-26s refused: %s%n", name, refused.getMessage());
+            return;
+        }
+        int[] w = words(spirv);
         Map<Integer, Integer> structMembers = new HashMap<>();   // struct id -> member count
         Map<Integer, Integer> pointerToType = new HashMap<>();   // pointer id -> pointee id
         Integer pushStructId = null;

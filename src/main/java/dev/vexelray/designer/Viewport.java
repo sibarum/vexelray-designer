@@ -13,6 +13,9 @@ import dev.vexelray.gui.draw.Sketch;
 import dev.vexelray.gui.plot.Camera;
 import dev.vexelray.shader.ComposedShader;
 import dev.vexelray.shader.Shadings;
+import dev.vexelray.surface.ParamBlock;
+import dev.vexelray.surface.ParamId;
+import dev.vexelray.surface.Scalar;
 import dev.vexelray.surface.Surface;
 import dev.vexelray.technique.sdf.MarchSettings;
 import dev.vexelray.technique.sdf.SdfComposer;
@@ -69,7 +72,18 @@ final class Viewport {
     /** Re-mint the target once the box exceeds it by this much. */
     private static final float GROWTH = 1.35f;
 
-    private static final int PUSH_BYTES = SdfComposer.CAMERA_BYTES;
+    /**
+     * The scene being marched, and the values its parameters currently hold.
+     *
+     * <p>Both are needed on the render thread and neither is derivable there: the push-constant block is the
+     * camera, the lens and one float per parameter, so its <em>size</em> is a property of the scene and its
+     * contents are a property of what the sliders were last left at. Written by the compose worker before
+     * {@code sceneDirty} is set and read by the frame pump afterwards, which is the same handoff the SPIR-V
+     * uses.
+     */
+    private volatile SdfScene scene;
+    private volatile ParamBlock params;
+    private volatile int pushBytes = SdfComposer.CAMERA_BYTES;
 
     /** How far the ground grid runs, and how far apart its lines are. */
     private static final int GRID_HALF = 6;
@@ -202,13 +216,24 @@ final class Viewport {
         }
         try {
             long t0 = System.nanoTime();
-            SdfScene scene = new SdfScene(surface, Shadings.defaultKeyLight(), MarchSettings.DEFAULT,
+            SdfScene next = new SdfScene(surface, Shadings.defaultKeyLight(), MarchSettings.DEFAULT,
                     new SdfScene.Rgb(0.72, 0.74, 0.78), sky, FOCAL_LENGTH);
             // Both stages from one call: index 0 is the fullscreen vertex, index 1 the march.
-            List<ComposedShader> composed = new SdfComposer().compose(scene);
+            List<ComposedShader> composed = new SdfComposer().compose(next);
             byte[] vs = composed.get(0).spirv();
             byte[] fs = composed.get(1).spirv();
             double ms = (System.nanoTime() - t0) / 1e6;
+            // Values cross the recompile by identity: a parameter that survived the edit keeps what it was
+            // holding even if it moved slot, and one the edit removed simply drops (R4's rule, and the reason
+            // ParamBlock publishes a writer rather than an offset).
+            ParamBlock carried = SdfComposer.paramBlock(next);
+            ParamBlock previous = this.params;
+            if (previous != null) {
+                carried.carryFrom(previous);
+            }
+            this.scene = next;
+            this.params = carried;
+            this.pushBytes = SdfComposer.pushBytes(next);
             this.fragmentSpirv = fs;
             this.vertexSpirv = vs;
             this.sceneDirty = true;
@@ -408,7 +433,7 @@ final class Viewport {
         }
         frameDirty = false;
         SdfScene.Rgb bg = sky;
-        target.renderInto(pipeline, 0L, 0L, 3, cameraBytes((double) w / h),
+        target.renderInto(pipeline, 0L, 0L, 3, pushConstantBytes((double) w / h),
                 (float) bg.r(), (float) bg.g(), (float) bg.b(), 1f);
         // Announced only after the submission returns. renderInto waits for its own work, so by here the image
         // really is in SHADER_READ_ONLY and the next presented frame samples it. Announcing before the call
@@ -458,11 +483,32 @@ final class Viewport {
             // samples the image this pipeline drew into.
             pipeline.close();
         }
-        pipeline = target.pipelineFor(vs, "main", fs, "main", PUSH_BYTES);
+        pipeline = target.pipelineFor(vs, "main", fs, "main", pushBytes);
         return true;
     }
 
-    private byte[] cameraBytes(double aspect) {
+    /**
+     * Set a parameter and ask for a frame — the whole of what a slider has to do.
+     *
+     * <p>No compose, no pipeline, no SPIR-V: only {@code frameDirty}, exactly as turning the camera does. That
+     * is the point of the stage this method belongs to, and the reason it is this short.
+     */
+    void setParam(ParamId id, double value) {
+        ParamBlock block = params;
+        if (block == null || !block.holds(id)) {
+            return;                                   // the edit that removed it got here first
+        }
+        block.write(id, value);
+        frameDirty = true;
+    }
+
+    /** The parameters of the surface on screen, in slot order — what a panel builds sliders from. */
+    List<Scalar.Param> parameters() {
+        ParamBlock block = params;
+        return block == null ? List.of() : block.params();
+    }
+
+    private byte[] pushConstantBytes(double aspect) {
         double yaw;
         double pitch;
         double[] eye;
@@ -471,6 +517,6 @@ final class Viewport {
             pitch = camera.pitch();
             eye = worldEye();
         }
-        return SdfComposer.cameraBytes(eye[0], eye[1], eye[2], yaw, pitch, aspect);
+        return SdfComposer.pushConstantBytes(scene, eye[0], eye[1], eye[2], yaw, pitch, aspect, params);
     }
 }
