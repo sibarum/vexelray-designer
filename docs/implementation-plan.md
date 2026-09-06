@@ -12,15 +12,17 @@
 
 ## 0. What the plan rests on, verified in the tree
 
-Four facts, checked before the staging below was chosen. Two of them make a stage much cheaper than expected;
-one makes a stage more expensive.
+Five facts, checked before the staging below was chosen. All five make a stage cheaper than expected; the
+fourth was recorded the other way round in the first version of this plan, and correcting it is what moved P0b
+from "deferred" to "with P0a".
 
 | Fact | Consequence |
 |---|---|
 | `core` already has `Function` (name, `Type.FunctionType`, `Region` body), `Expr.Call(Function, args)` and `Expr.Param(index, type)` | **R2 needs no new IR.** Function abstraction in the lowering is a `SurfaceCompiler` change against a vocabulary that already exists and that `CoreToSpirv` already emits — S1 uses it for `float sdf(vec3)`, and D12 used it to cut 22 MB. P1 is a compiler stage, not an IR stage. |
 | `core` has `Buffer` (storage buffer, descriptor set 0, `BufferLoad(buffer, index)`) but **no uniform-buffer read** | The general parameter block is a storage buffer, and it is reachable with existing IR. |
-| A module may declare **one** `PushConstants` block (the SPIR-V rule, stated in its javadoc); `SdfComposer` spends 24 bytes of it on the camera; Vulkan's guaranteed floor is 128 bytes | ~26 floats of parameters fit in push constants with no Vulkan work at all. That is enough to prove R1 end to end, so it is P0a; the buffer is P0b. |
-| `SampledColorTarget`'s descriptor set is a **combined image sampler pointing at itself**, for later pipelines to sample it. The pipeline rendering *into* the target has no input descriptor set | P0b is not just "declare a `Buffer`" — it needs new FFM plumbing in `SampledColorTarget`/`pipelineFor` to create, own and bind an input descriptor set. This is the one genuinely Vulkan-side piece, and the reason it is staged behind a version that works without it. |
+| A module may declare **one** `PushConstants` block (the SPIR-V rule, stated in its javadoc); `SdfComposer` spends 24 bytes of it on the camera; Vulkan's guaranteed floor is 128 bytes. **Nothing in `vexelray` ever queries `maxPushConstantsSize`** — the 128 is read off the spec, not off the device | ~26 floats of parameters fit in push constants with no Vulkan work at all, which is enough to prove R1 end to end (P0a). But the real ceiling is per-device and unmeasured, so it is the wrong axis to scale a *document* on: see P0b. |
+| **`StorageBuffer` already exists** in `vexelray-vulkan/present` — host-visible, persistently mapped floats, owning its own descriptor pool and set, exposing `descriptorSetLayout()`, `descriptorSet()` and `update(float[], int)`. `SampledColorTarget.pipelineFor` already takes `long[] descriptorSetLayouts`, and its javadoc says outright: *"Pass the layout from whatever owns the descriptor (see `StorageBuffer`), and pass that same object's set to `renderInto`."* `renderInto` binds it at `firstSet = 0` | **P0b needs no new FFM.** The plumbing it was staged behind is built, documented and pointed at this exact use — `StorageBuffer`'s own javadoc names "a distance field whose geometry is data rather than code" as its motivating case. What remains is `SdfComposer` emitting `BufferLoad` instead of `PushConstantRead`, and `Viewport` owning the buffer and threading its layout and set through two calls it already makes. |
+| `renderInto` **waits on its own fence before returning** (`SampledColorTarget`, the comment explaining the change from `vkDeviceWaitIdle`), and `StorageBuffer`'s javadoc states the consequence: a caller that updates between calls to `renderInto` is already safe | P0b needs **no ring buffer and no frames-in-flight regions**. It also inherits an obligation — see P0b's note on what happens the day that wait is removed. |
 
 ---
 
@@ -46,9 +48,17 @@ one makes a stage more expensive.
      normalisation is nonlinear, and nothing in the design tool wants to sweep them yet. Recorded as a known
      limit, not as an oversight.
    - `Scale.factor`, all primitive extents, `Repeat` cell sizes, `Twist`/`Bend` rates — accept.
-5. **`ParamBlock`**: an ordered walk of the tree collecting distinct `ParamId`s → slot assignment →
-   `offsetOf(ParamId)`. Published by `SdfComposer` alongside the SPIR-V, so the app can write values by
-   identity (which R4 then needs across a pipeline swap).
+5. **`ParamBlock`**: an ordered walk of the tree collecting distinct `ParamId`s → slot assignment. Published by
+   `SdfComposer` alongside the SPIR-V, so the app can write values by identity (which R4 then needs across a
+   pipeline swap).
+   - **It publishes `write(ParamId, double)`, not `offsetOf(ParamId)`.** A byte offset is the encoding leaking
+     through the boundary, and it commits the app to one storage class and one representation. Three changes
+     that are otherwise invisible would each break it: P0b's move from push constants to a buffer, any
+     quantised packing of two ranged parameters into one 32-bit slot, and N-buffering the block if R4 ever
+     removes the fence wait. A writer keeps all three behind `SdfComposer`, and — since R5's format must carry
+     parameter declarations — keeps a byte offset from ever reaching disk, where changing it would mean a
+     format version. This is the same class of decision as §14's B0 three: cheap now, expensive after
+     publication.
 6. **`focalLength` joins the block** — R8 falls out for free, and proves the mechanism reaches scene-level
    values, not just `Surface` numerics.
 7. **`Surface.shaderKey()`** — the parameter-erasing normal form of R1.2: each `Param` contributes its slot and
@@ -65,6 +75,15 @@ one makes a stage more expensive.
 
 **Cap**: `(128 − 28) / 4 = 25` parameters. Exceeding it throws by name (R12) and points at P0b.
 
+That number is smaller than it looks, and it is why P0b is no longer deferred behind it. A `Sphere` is four
+numerics and a `Translate` is three, so a tree of twenty primitives and fifteen transforms wants north of a
+hundred — 25 is spent somewhere around the sixth shape, well before anyone would call the tool exercised.
+And the 128 is the spec floor rather than a measurement: `maxPushConstantsSize` is queried nowhere in
+`vexelray`. Query it, and publish it through `SurfaceLimits` alongside R3's estimates so the app can report
+headroom instead of discovering it — but do not scale a *document* on it. It varies per device, so a design
+authored where the driver reports 256 bytes fails to open where it reports 128, and it fails at load time.
+Measure the ceiling to be honest about it; use P0b to stop standing on it.
+
 **Tests**
 - `shaderKey` equality across a value sweep — pure CPU, no GPU, runs in the S0 suite.
 - 200-value sweep issues one `vkCreateGraphicsPipelines` and 200 push-constant writes (R1 acceptance).
@@ -77,12 +96,58 @@ one makes a stage more expensive.
 - **A foreign block is refused**: `Implicit` reading from a `PushConstants` the composer did not issue fails by
   name rather than composing. `tools/bench/ParamImplicit.java` is the reproduction.
 
-### P0b — the parameter buffer *(deferred until a design exceeds 25)*
+### P0b — the parameter buffer *(with P0a, not deferred behind it)*
 
-Swap the block's backing from `PushConstants` to `Buffer` at descriptor set 0, `BufferLoad(block, slot)`.
-Requires: an input descriptor set layout, pool and set owned by the render target; a host-visible buffer;
-`pipelineFor` accepting the layout; `renderInto` binding the set. The `Surface` side and `ParamBlock` do not
-change — which is the point of publishing the block by identity in P0a.
+Swap the block's backing from `PushConstants` to `Buffer` at descriptor set 0, `BufferLoad(block, slot)`. The
+`Surface` side and `ParamBlock` do not change — which is the point of publishing the block by identity in P0a.
+
+The first version of this plan deferred P0b because it read as the one genuinely Vulkan-side piece: "an input
+descriptor set layout, pool and set owned by the render target; a host-visible buffer; `pipelineFor` accepting
+the layout; `renderInto` binding the set." **All four of those exist** (§0). `StorageBuffer` is the first two,
+`pipelineFor`'s `long[] descriptorSetLayouts` overload is the third and names `StorageBuffer` in its own
+javadoc, and `renderInto` already binds a set at `firstSet = 0`. What is left:
+
+1. **`SdfComposer` emits `BufferLoad(block, slot)`** where P0a emitted `PushConstantRead`. The push block keeps
+   the camera and `focalLength`; only the parameters move.
+2. **`Viewport` owns a `StorageBuffer`**, passes `descriptorSetLayout()` to `pipelineFor` and `descriptorSet()`
+   to `renderInto`, and calls `update` when a slider moves. Capacity is fixed at construction, so growing past
+   it means recreating the buffer and the pipeline — size it generously, and let R3 report against it.
+3. **Hoist the loads.** This is the one new risk the push-constant version did not have. A push constant lands
+   in a register; a buffer load is memory, and the march reads parameters inside a ~100-iteration loop. Drivers
+   hoist loop-invariant loads, but P1 makes the field a `Function`, and hoisting across a call is exactly where
+   that gives up. Decorate the block `NonWritable` + `Restrict`, or load it once into locals at the top of
+   `main` and have the field read those. Measure it — discovering this as "the buffer version is mysteriously
+   slower" would be an avoidable afternoon.
+
+**Two constraints inherited rather than chosen**
+
+- **`renderInto` binds exactly one descriptor set.** Fine here, because the march samples nothing — the
+  parameter buffer can have set 0 to itself. R6's pick pass is the first thing that wants a second, and that
+  *is* a small `renderInto` change, to be paid there rather than here.
+- **The fence wait is load-bearing.** `StorageBuffer.update` is safe between `renderInto` calls only because
+  `renderInto` waits on its own fence before returning. `SampledColorTarget`'s own comment contemplates
+  removing that wait, and R4 and R11 are the requirements that would want it removed. On that day a single
+  mapped block becomes a write-while-reading hazard. N-buffering it behind `ParamBlock` costs nothing today
+  and is unpleasant to retrofit through a published API — which is the second argument for P0a step 5's
+  writer.
+
+**Not doing: quantised packing.** A ranged parameter (R1.1) does not need 32 bits — `unpackUnorm2x16` plus a
+`mix(min, max, t)` whose bounds are already compile-time constants (they are in the shader key, P0a step 7)
+would fit two per slot and take the push-constant cap to 50. It is safe: §1.3's `ParamProbe` shows
+`Field.lipschitz` is `1.000` regardless of any numeric, so quantising a value cannot punch holes, and
+`mix(min, max, t)` stays inside the declared range by construction. It is recorded here and *not* done, because
+it buys 25 parameters where P0b buys thousands for comparable effort. It becomes interesting again only as a
+bandwidth measure, and P0a step 5's writer is what keeps that option open.
+
+**Tests**
+- The P0a sweep, unchanged and passing against the buffer backing: 200 values, one
+  `vkCreateGraphicsPipelines`, 200 writes. That it needs no edit is the acceptance test for step 5's writer.
+- A scene with 200 parameters composes, renders, and reports its slots — the case P0a throws on.
+- `spirv-val` on a scene whose field reads `BufferLoad`, and a differential against the push-constant lowering
+  of the same `Surface` at the same values, to f32 tolerance. Both lower from one `Surface`, so this is cheap
+  and it is the only thing that makes the swap trustworthy.
+- **March-step cost with and without the hoist**, on the `Ladder` scenes, so step 3 is a number rather than an
+  intention.
 
 **Designer can now**: drive every numeric with a slider at frame rate. This is the single biggest unlock in
 the plan, and it lands first.
@@ -247,12 +312,12 @@ parameter ranges (P0a) and reports a violation instead of rendering a lie. Ends,
 | Stage | Discharges | Grade | Blocked by |
 |---|---|---|---|
 | P0a | R1, R1.1, R1.2, R8 | B0 | — |
+| P0b | R1 at scale | B1 | P0a (and nothing else — §0's fourth fact) |
 | P1 | R2, R2.1 | B0 | — (independent of P0a; both touch `SurfaceCompiler`, so land P0a first to avoid a merge) |
 | P2 | R6.1, R7 payload | B0 | P1 (payload rides the lowering P1 rewrites) |
 | P3 | R3, R10, R12 | B1 | P1 (needs its ground truth), P2 (needs `NodeId` for attribution) |
 | P4 | R4, R11 | B1 | P0a (parameter identity across swap) |
 | P5 | R13 | B1 | P2 |
-| P0b | R1 at scale | B1 | P0a |
 | P6 | R5 | B2 | P0a, P2, P5 |
 | P7 | R6 pick | B1 | P2 |
 | P8 | R9 | I | P0a |
