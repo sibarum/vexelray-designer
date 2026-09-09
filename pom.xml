@@ -22,6 +22,7 @@
         <vexelray-gui.version>0.1.0-SNAPSHOT</vexelray-gui.version>
         <vexelray.version>0.1.0-SNAPSHOT</vexelray.version>
         <tactroller.version>1.0-SNAPSHOT</tactroller.version>
+        <vexelray-framework.version>0.1.0-SNAPSHOT</vexelray-framework.version>
 
         <app.mainClass>dev.vexelray.designer.DesignerApp</app.mainClass>
         <!-- Program args for exec:exec (one token each; empty = interactive). -->
@@ -64,6 +65,21 @@
     </properties>
 
     <dependencies>
+        <!-- The application edge: phases, the frame loop, input, window memory, argument parsing. What used to
+             be the top 200 lines of DesignerApp. -->
+        <dependency>
+            <groupId>dev.vexelray.framework</groupId>
+            <artifactId>vexelray-framework-shell</artifactId>
+            <version>${vexelray-framework.version}</version>
+        </dependency>
+        <!-- The driving socket, wired once instead of by hand. A module of its own because it links a listening
+             socket, so an application says whether it wants one - and this one does: see drivers() in
+             DesignerWiring for the second socket it still binds for itself. -->
+        <dependency>
+            <groupId>dev.vexelray.framework</groupId>
+            <artifactId>vexelray-framework-automation</artifactId>
+            <version>${vexelray-framework.version}</version>
+        </dependency>
         <!-- Driving the running app the way a person does: real window, real Vulkan, real frame loop. A
              troubleshooting instrument, not a shipped feature - see vexelray-gui/docs/automation.md. -->
         <dependency>
@@ -120,7 +136,7 @@
                     <release>${maven.compiler.release}</release>
                 </configuration>
             </plugin>
-            <!-- Run: mvn compile exec:exec ; headless capture: mvn compile exec:exec "-Dapp.args=[dash][dash]capture" -->
+            <!-- Run: mvn compile exec:exec ; a bounded run that exits on its own: mvn compile exec:exec "-Dapp.args=3" -->
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
                 <artifactId>exec-maven-plugin</artifactId>

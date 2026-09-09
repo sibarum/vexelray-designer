@@ -11,7 +11,7 @@ Two instruments are wired into this application, both off unless asked for:
   a resource ledger that is the leak half. See [`atchung/docs/probe.md`](../../atchung/docs/probe.md).
 
 The viewport is the reason both matter here. It cannot be checked by reading a number — "is it right" is a
-question about pixels — and it is the one window `--capture` structurally cannot photograph.
+question about pixels — and it is the one window a headless capture structurally cannot photograph.
 
 ---
 
@@ -36,7 +36,8 @@ and `shot` on 7654 photographs the wrong window. Loopback only, one connection a
 one hand.
 
 The run is **uncapped**, which is what you want: the loop parks between frames and the drivers keep working.
-Passing `--capture` makes it a three-frame script that will have exited before your first command lands. Kill
+Passing a frame count — `-Dapp.args=3` — makes it a bounded script that will have exited before your first
+command lands. Kill
 the uncapped run when you are done.
 
 ### Talking to it
