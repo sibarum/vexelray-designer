@@ -273,6 +273,45 @@ memory, which is the measurement rather than a caveat.
 - Payload survives a `Twist` over a `Repeat` over a `smoothUnion`.
 - `NodeId` is preserved across a P5 edit of a sibling.
 
+**Step 1 landed** — `vexelray` `Two spheres in one place are one shape and two objects`. Every node carries a
+`NodeId`, minted at construction, preserved by every edit that does not replace it, supplied rather than minted
+when a document is read back.
+
+The blast radius was where the plan said it would be, and it was all in one direction: **identity breaks
+structural equality, and three things were leaning on it.**
+
+- The **shader cache** collapsed identical scenes by the description's own `equals`. `SdfComposer` now
+  overrides `keyFor` and fingerprints `surface.shaderKey()` — the seam `ShaderKey`'s own javadoc had been
+  pointing at all along.
+- **`shaderKey()`** erases node identity as well as parameter identity, replacing each id with the node's
+  position in the walk. One rule in both cases: erase what the lowering does not read.
+- **`Shared`** — P1's decision about what to emit once — counted by structural equality, so identity would
+  have turned every shared subtree back into a copy. It now counts on the tree with identities flattened, and
+  hands the compiler two answers rather than one: which *instances* to share, and which *shape* to key the
+  memo on. **That second half was a real bug**, and the test written for the interaction caught it: two
+  separately authored copies of one arm compiled to two functions. Nothing would have failed — it is a size
+  regression with no wrong answer in it.
+
+The ladder is byte-identical across the change, rung for rung and evaluation for evaluation, which is the
+evidence that all three normalisations are right.
+
+**Step 2 is blocked on a decision, not on work.** The payload channel collides with P1, and the plan predates
+P1 so it does not say which way to resolve it. A shared subtree is emitted **once** and called from every
+site; a payload names **which node** — and two sites of one shared function are two different nodes. The
+channel and the sharing cannot both be unconditional. Three ways out:
+
+| | what it costs | what it gives up |
+|---|---|---|
+| **Payload rides the distance** — every function returns `vec2(distance, payload)` | every scene pays the payload's selection arithmetic, whether or not anything reads it | the module's stated invariant, that generality costs nothing when it is not used |
+| **A second lowering mode** — payload on request, and when on, the memo keys by node instead of by shape | two lowerings to keep in step; the payload variant is larger, though a repeat still shares | nothing on the display path: a scene that does not ask pays nothing |
+| **Payload without sharing** — build it inline, as colour is | the pre-P1 size, which for a nest of repeats does not fit in memory | the ladder, immediately |
+
+The second is recommended, and it is what **P7 already assumes**: the pick pass is *"a second variant composed
+from the same `SdfScene`"*, rendered on demand and not in the frame. Sharing by node rather than by shape
+keeps a repeat's 2ⁿ cells on one function — they are one authored node, and selecting any cell *should* select
+that node — and only separately authored duplicates lose sharing in that variant, which is the right trade,
+since those are exactly the ones that must report different ids.
+
 ---
 
 ## P3 — The cost and extent walk *(R3, R10, R12)*
