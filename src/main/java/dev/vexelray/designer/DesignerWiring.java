@@ -49,7 +49,7 @@ import java.util.Map;
  * below is what that costs — a {@code Gui} of its own to dress, a second automation socket, and controls that
  * have to be looked up per command because a named window's OS window does not exist when the driver starts.
  */
-final class DesignerWiring implements Wiring {
+final class DesignerWiring extends Wiring {
 
     /**
      * The facts the framework needs about this application.
