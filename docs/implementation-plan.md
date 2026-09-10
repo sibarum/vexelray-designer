@@ -295,22 +295,47 @@ structural equality, and three things were leaning on it.**
 The ladder is byte-identical across the change, rung for rung and evaluation for evaluation, which is the
 evidence that all three normalisations are right.
 
-**Step 2 is blocked on a decision, not on work.** The payload channel collides with P1, and the plan predates
-P1 so it does not say which way to resolve it. A shared subtree is emitted **once** and called from every
-site; a payload names **which node** — and two sites of one shared function are two different nodes. The
-channel and the sharing cannot both be unconditional. Three ways out:
+**Step 2 landed as a second lowering mode** — `vexelray` `A field that says how far away, and a second one
+that says what`. The payload collided with P1, and the plan predates P1 so it did not say which way to
+resolve it: a shared subtree is emitted **once** and called from every site; a payload names **which node**;
+two sites of one shared function are two nodes. Three ways out, and the third column is why the second won:
 
 | | what it costs | what it gives up |
 |---|---|---|
 | **Payload rides the distance** — every function returns `vec2(distance, payload)` | every scene pays the payload's selection arithmetic, whether or not anything reads it | the module's stated invariant, that generality costs nothing when it is not used |
-| **A second lowering mode** — payload on request, and when on, the memo keys by node instead of by shape | two lowerings to keep in step; the payload variant is larger, though a repeat still shares | nothing on the display path: a scene that does not ask pays nothing |
+| **A second lowering mode** ✔ — payload on request, and when on, the memo keys by node instead of by shape | two lowerings to keep in step; the payload variant is larger, though a repeat still shares | nothing on the display path: a scene that does not ask pays nothing |
 | **Payload without sharing** — build it inline, as colour is | the pre-P1 size, which for a nest of repeats does not fit in memory | the ladder, immediately |
 
-The second is recommended, and it is what **P7 already assumes**: the pick pass is *"a second variant composed
-from the same `SdfScene`"*, rendered on demand and not in the frame. Sharing by node rather than by shape
-keeps a repeat's 2ⁿ cells on one function — they are one authored node, and selecting any cell *should* select
-that node — and only separately authored duplicates lose sharing in that variant, which is the right trade,
-since those are exactly the ones that must report different ids.
+It is also what **P7 already assumed**: the pick pass is *"a second variant composed from the same
+`SdfScene`"*, rendered on demand and not in the frame. So `compile` is the field it always was, byte for
+byte, and `compileWithPayload` is the one that answers *what*. Two things differ in the second mode, both
+real: every combinator **binds its arms' distances**, so the comparison that picks the distance picks the
+payload with it; and sharing **narrows from shapes to nodes**, so a repeat's 2ⁿ cells still share one
+function — one authored node, and clicking any cell should select it — while two separately authored
+lookalikes become two, because they are two answers.
+
+Four things worth keeping:
+
+- **The channel carries a slot, and `PayloadTable` is what a slot means.** A slot is an encoding: assigned by
+  walk order, and it moves whenever the tree changes shape. Resolve it the moment it comes back; never store
+  it. The same rule `ParamBlock` follows, for the same reason.
+- **Only the nodes that own their points get one** — a primitive, a stroke, an implicit. A combinator chooses
+  between children rather than owning a point, and asking for a union's slot says so by name. So a click
+  resolves to the shape under the cursor, and the tree view is what selects a group.
+- **A blend chooses rather than blends**, which the plan asked for and which needed stating twice over: the
+  soft forms follow the hard extremum, and a `mix` of two slots at a `step` of exactly 0 or 1 is one of the
+  two slots. Half of one name and half of another is not a name.
+- **Identity costs one call per pixel, not nine per step.** `identityFragmentSpirv` composes the same march
+  over `vec2 hit(vec3)` behind a `float` wrapper, so the march is not rewritten around a channel it never
+  reads: eight calls to the wrapper, two to `hit`, asserted. `ShadingPoint` carries the payload so a model can
+  key off identity, defaulting to `NO_PAYLOAD` where the renderer carries none.
+
+What makes it trustworthy is that both lowerings describe the same surface — the same distance everywhere, to
+f32 tolerance. The payload variant costs bindings and narrower sharing, not a different shape.
+
+**All three B0 stages are now in.** What is left of P2 is the material half of R7, which is waiting on a
+material vocabulary rather than on the channel; the channel has room for it and does not change when it
+arrives.
 
 ---
 
@@ -417,10 +442,10 @@ parameter ranges (P0a) and reports a violation instead of rendering a lie. Ends,
 
 | Stage | Discharges | Grade | Blocked by |
 |---|---|---|---|
-| P0a | R1, R1.1, R1.2, R8 | B0 | — |
+| ~~P0a~~ **done** | R1, R1.1, R1.2, R8 | B0 | — |
 | P0b | R1 at scale | B1 | P0a (and nothing else — §0's fourth fact) |
-| P1 | R2, R2.1 | B0 | — (independent of P0a; both touch `SurfaceCompiler`, so land P0a first to avoid a merge) |
-| P2 | R6.1, R7 payload | B0 | P1 (payload rides the lowering P1 rewrites) |
+| ~~P1~~ **done** | R2, R2.1 | B0 | — (independent of P0a; both touch `SurfaceCompiler`, so land P0a first to avoid a merge) |
+| ~~P2~~ **done** (R7's material vocabulary excepted) | R6.1, R7 payload | B0 | P1 (payload rides the lowering P1 rewrites) |
 | P3 | R3, R10, R12 | B1 | P1 (needs its ground truth), P2 (needs `NodeId` for attribution) |
 | P4 | R4, R11 | B1 | P0a (parameter identity across swap) |
 | P5 | R13 | B1 | P2 |
