@@ -207,6 +207,46 @@ the plan, and it lands first.
 **Honest note**: evaluation cost still multiplies for `Repeat`. That is inherent to the neighbour-cell `min`,
 not a defect of this stage. P3 reports it; S3's interval pass is what eventually reduces it.
 
+**Landed** — `vexelray` `A stack of operators is a list, not a product`. The ladder, before and after, with the
+two budgets P1 step 4 asked for:
+
+| rung | before | after | nodes | evals | fns |
+|---|---|---|---|---|---|
+| `smoothUnion(8)` | 15,172 B | 15,172 B | 826 | 826 | 0 |
+| `+ Repeat 2 axes` | 191,032 B | 12,596 B | 443 | 4,049 | 9 |
+| `+ Repeat 3 axes` | 496,744 B | 14,472 B | 566 | 8,116 | 9 |
+| `+ Twist` | 1,295,500 B | 15,468 B | 606 | 8,156 | 9 |
+| `+ Twist + Bend` | 4,091,072 B | 16,192 B | 646 | 8,196 | 9 |
+| `+ PolarRepeat 6` | **refused** | 17,312 B | 735 | 16,485 | 12 |
+| `+ Mirror` | **refused** | 17,664 B | 745 | 16,495 | 12 |
+| `+ Repeat 2 again` | **refused** | 19,304 B | 852 | 66,093 | 14 |
+
+**Size is flat and work is not**, which is the stage stated in two columns: 826 nodes at one operator and 852
+at eight, against 826 evaluations and 66,093. The honest note above is now a number rather than a caveat, and
+it is what P3 will predict against.
+
+Four things the plan did not have right:
+
+- **`Mirror` was never 2ⁿ.** It folds with `abs` and lowers its child <em>once</em> — step 2 named it by
+  mistake. What does multiply is `Repeat` (2ⁿ) and `PolarRepeat` (2).
+- **A soft blend writes each child twice**, and nobody had noticed. `log-sum-exp` is stated relative to the
+  hard extremum, so every child appears in the `min` chain and again in its own exponential. Invisible in the
+  tree, two copies in the module — and the reason the second rung is *smaller* than the first.
+- **A leaf written twice is not worth a function**, so sharing has a threshold: anything with a child of its
+  own shares at two lowerings, a bare primitive at four. The second rung being smaller than the first is the
+  visible cost of that threshold, and lowering it is a tuning question left open rather than settled.
+- **A `LocalVar` is an identity, not a value.** Naming a point means a lowered `Field` is no longer
+  structurally equal across two compiles of one surface — a variable is a place, and two compiles name two
+  places. What matters survives: the `Surface` is still a record all the way down, so the shader cache still
+  keys on it, and an equal scene still composes to byte-identical SPIR-V. Asserted, because it is the property
+  the cache rests on.
+
+Also: `Field` is now a program rather than an expression — it carries the declarations its distance reads and
+the functions it calls, and whoever assembles the module must add them (`SdfComposer` does, and publishes
+`helperFunctions`). `Field.at` still hands back the one-expression form for callers that need one, by
+substituting the declarations back and expanding the calls; for a nest of repeats that form does not fit in
+memory, which is the measurement rather than a caveat.
+
 ---
 
 ## P2 — Identity and payload *(R6.1, R7; feeds R5, R12, R13)*

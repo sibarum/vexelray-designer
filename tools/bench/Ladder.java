@@ -1,8 +1,21 @@
+import dev.vexelray.surface.Field;
 import dev.vexelray.surface.Surface;
 import dev.vexelray.technique.sdf.SdfComposer;
 import dev.vexelray.technique.sdf.SdfScene;
 
-/** How a designer's stack grows as operators are piled on -- one modifier at a time. */
+/**
+ * How a designer's stack grows as operators are piled on -- one modifier at a time.
+ *
+ * <p>Three numbers per rung, and P1 is the reason there are three. <b>Bytes</b> is what the driver compiles.
+ * <b>nodes</b> is what the compiler emitted, counting a shared function once because that is how many times
+ * it is written. <b>evals</b> is the same program with every call charged the cost of its callee -- what the
+ * GPU actually runs per query.
+ *
+ * <p>Reading them together is the point. P1 moved cost from the first two to the third deliberately: a
+ * three-axis repeat emits one copy of its child and evaluates it eight times, so a stage that reported only
+ * size would be claiming a saving it did not make. Before P1 the rungs read 15 KB, 191 KB, 497 KB, 1.3 MB,
+ * 4.1 MB, and then three refusals -- the sixth operator did not compile.
+ */
 public final class Ladder {
     public static void main(String[] args) {
         Surface[] eight = new Surface[8];
@@ -34,8 +47,10 @@ public final class Ladder {
             long t0 = System.nanoTime();
             byte[] spirv = SdfComposer.fragmentSpirv(scene);
             long dt = System.nanoTime() - t0;
-            System.out.printf("%-34s %12s %10.1f ms%n", name,
-                    String.format("%,d B", spirv.length), dt / 1e6);
+            Field field = SdfComposer.field(scene);
+            System.out.printf("%-34s %12s %10.1f ms   %,9d nodes  %,12d evals  %3d fn%n", name,
+                    String.format("%,d B", spirv.length), dt / 1e6,
+                    field.nodes(), field.evaluations(), field.helpers().size());
         } catch (Throwable t) {
             String m = t.getMessage();
             System.out.printf("%-34s %12s  %s%n", name, "--",
