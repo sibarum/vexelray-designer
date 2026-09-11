@@ -179,6 +179,48 @@ bandwidth measure, and P0a step 5's writer is what keeps that option open.
 **Designer can now**: drive every numeric with a slider at frame rate. This is the single biggest unlock in
 the plan, and it lands first.
 
+**Landed** — `vexelray` `Ask the device which road, never which designs are allowed`. All three steps, plus a
+correction to this document's own reasoning.
+
+**The device is queried after all, and the plan was wrong to rule it out.** The sentence above — *"do not
+scale a document on it; it varies per device, so a design authored where the driver reports 256 bytes fails to
+open where it reports 128"* — is right about the **cap** and wrong about the **query**, and P0b is precisely
+what separates them. Once both roads exist, the reported limit decides *which road the values travel*, not
+whether the design exists. A design opens everywhere; on a smaller machine its values simply go by buffer.
+So the rule is sharper than "do not query":
+
+> **Query the device to choose the road. Never to decide what a design may contain.**
+
+This machine reports **256 bytes — 57 parameters, against the floor's 25**, which the app had been leaving on
+the table. `ParamBacking` is that choice as a value: `AUTO` by size against the reported limit, `PUSH_CONSTANTS`
+or `BUFFER` forced for a test, set once when the device is known.
+
+- **`AUTO` earns its keep** rather than always taking the buffer, and this *is* step 3's hoisting risk
+  answered: a push constant lands in a register and a buffer load is memory, read inside a march loop that
+  runs a hundred iterations per pixel. A design that fits keeps the register path; only one that does not
+  pays. Not taking the buffer until it is needed beats hoisting loads out of it.
+- **The backing is in the shader key**, because it is in the SPIR-V — keyed on the *road taken*, so two
+  devices reporting 128 and 256 share one cache entry for a three-parameter scene and split for a forty.
+- **P0a's writer is what made it free.** `ParamBlock` publishes `write(ParamId, double)` and no offset, and
+  the third reason its javadoc gave for that was exactly this move; the surface, the slots and the host API
+  are untouched, and `inBuffer` is thirty lines beside `inPushConstants`.
+- **`maxPushConstantsSize` costs no new FFM**, as §0 predicted of the rest: the
+  `VkPhysicalDeviceProperties` layout this repo already had stopped at the device name, and every field
+  between it and the limit is now *named* rather than skipped, so the offset is derived by the layout API
+  instead of counted by hand. A miscount there does not crash — it reads a neighbouring field and returns a
+  plausible number — so anything below the guaranteed 128 is refused as a layout bug rather than believed.
+
+Three checks, in increasing order of what they would have caught: `spirv-val` accepts the buffer-backed
+module; the two lowerings of one surface agree point by point on the CPU (which needed `Eval` to learn both
+roads, and makes parametric fields evaluable at all); and `BufferRoadSmokeTest` **renders 64 spheres past the
+cap on a real device and counts pixels**, with the control being the same pipeline drawing small radii against
+large ones — a shader ignoring the buffer would draw the same picture twice.
+
+**Still open**: the engine's own `SdfRaymarchTechnique` binds no descriptor set, so a design past the cap
+takes the buffer road in the designer's viewport but not yet through the engine's technique path. The
+composer, the device query and the buffer are all in place for it; what is missing is the technique creating
+a `StorageBuffer` and binding it, which is a handful of lines in a file the engine work is actively editing.
+
 ---
 
 ## P1 — Function-abstracted lowering *(R2, R2.1; overlaps S0.5)*
@@ -443,7 +485,7 @@ parameter ranges (P0a) and reports a violation instead of rendering a lie. Ends,
 | Stage | Discharges | Grade | Blocked by |
 |---|---|---|---|
 | ~~P0a~~ **done** | R1, R1.1, R1.2, R8 | B0 | — |
-| P0b | R1 at scale | B1 | P0a (and nothing else — §0's fourth fact) |
+| ~~P0b~~ **done** (the engine technique excepted) | R1 at scale | B1 | P0a (and nothing else — §0's fourth fact) |
 | ~~P1~~ **done** | R2, R2.1 | B0 | — (independent of P0a; both touch `SurfaceCompiler`, so land P0a first to avoid a merge) |
 | ~~P2~~ **done** (R7's material vocabulary excepted) | R6.1, R7 payload | B0 | P1 (payload rides the lowering P1 rewrites) |
 | P3 | R3, R10, R12 | B1 | P1 (needs its ground truth), P2 (needs `NodeId` for attribution) |

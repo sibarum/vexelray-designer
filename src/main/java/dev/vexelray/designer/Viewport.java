@@ -11,6 +11,7 @@ import dev.vexelray.gui.core.layout.Length;
 import dev.vexelray.gui.core.layout.Rect;
 import dev.vexelray.gui.draw.Sketch;
 import dev.vexelray.gui.plot.Camera;
+import dev.vexelray.shader.ClipDepth;
 import dev.vexelray.shader.ComposedShader;
 import dev.vexelray.shader.Shadings;
 import dev.vexelray.surface.ParamBlock;
@@ -18,10 +19,12 @@ import dev.vexelray.surface.ParamId;
 import dev.vexelray.surface.Scalar;
 import dev.vexelray.surface.Surface;
 import dev.vexelray.technique.sdf.MarchSettings;
+import dev.vexelray.technique.sdf.ParamBacking;
 import dev.vexelray.technique.sdf.SdfComposer;
 import dev.vexelray.technique.sdf.SdfScene;
 import dev.vexelray.vulkan.present.GraphicsPipeline;
 import dev.vexelray.vulkan.present.SampledColorTarget;
+import dev.vexelray.vulkan.present.StorageBuffer;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -69,6 +72,14 @@ final class Viewport {
 
     private static final double FOCAL_LENGTH = 1.4;
 
+    /**
+     * The binding the generated fragment declares for the parameter buffer, at descriptor set 0.
+     *
+     * <p>The composer names it once ({@code SdfComposer.PARAM_BUFFER}) and the host has to agree; a mismatch
+     * is not a compile error, it is a shader reading an unbound descriptor.
+     */
+    private static final int PARAM_BINDING = 0;
+
     /** Re-mint the target once the box exceeds it by this much. */
     private static final float GROWTH = 1.35f;
 
@@ -85,6 +96,28 @@ final class Viewport {
     private volatile ParamBlock params;
     private volatile int pushBytes = SdfComposer.CAMERA_BYTES;
 
+    /**
+     * Which road this device wants the parameters to take, and which one the shader on screen actually took.
+     *
+     * <p>Two fields because the first is not known until a target exists — the device arrives with it — while
+     * a compose can happen before that. So the first compose assumes Vulkan's guaranteed floor, and the frame
+     * pump notices when the real number turns out to be larger and asks for one more compose. The second
+     * field is what the live pipeline was built for, and is what the frame must be pushed and bound for: they
+     * differ for exactly one frame, and pushing the wrong one would be pushing a block the shader does not
+     * have.
+     */
+    private volatile ParamBacking backing = ParamBacking.DEFAULT;
+    private volatile ParamBacking composedBacking = ParamBacking.DEFAULT;
+
+    /**
+     * The parameters, when they travel by buffer rather than by push constant.
+     *
+     * <p>Null while the design is small enough for push constants, which is the common case and the faster
+     * one — a push constant lands in a register and a buffer load is memory, read inside a march loop. Minted
+     * when a design outgrows the block, and sized generously so that adding a slider does not mint another.
+     */
+    private StorageBuffer paramBuffer;
+
     /** How far the ground grid runs, and how far apart its lines are. */
     private static final int GRID_HALF = 6;
     private static final double GRID_STEP = 1.0;
@@ -99,7 +132,7 @@ final class Viewport {
 
     private volatile byte[] vertexSpirv;
     private volatile byte[] fragmentSpirv;
-    private volatile SdfScene.Rgb sky = new SdfScene.Rgb(0.09, 0.10, 0.13);
+    private volatile Surface.Rgb sky = new Surface.Rgb(0.09, 0.10, 0.13);
 
     private volatile boolean sceneDirty;
     private volatile boolean frameDirty;
@@ -217,23 +250,28 @@ final class Viewport {
         try {
             long t0 = System.nanoTime();
             SdfScene next = new SdfScene(surface, Shadings.defaultKeyLight(), MarchSettings.DEFAULT,
-                    new SdfScene.Rgb(0.72, 0.74, 0.78), sky, FOCAL_LENGTH);
-            // Both stages from one call: index 0 is the fullscreen vertex, index 1 the march.
-            List<ComposedShader> composed = new SdfComposer().compose(next);
+                    new Surface.Rgb(0.72, 0.74, 0.78), sky, FOCAL_LENGTH, ClipDepth.DEFAULT.near());
+            // Composed against what this device reports, not against the spec floor: the floor holds 25
+            // parameters and the machine this was written on holds 57, and a design that fits the faster road
+            // should take it. Which road is a fact about the machine — the design is the same either way, and
+            // opens on a smaller device by the other one.
+            ParamBacking road = this.backing;
+            List<ComposedShader> composed = new SdfComposer(road).compose(next);
             byte[] vs = composed.get(0).spirv();
             byte[] fs = composed.get(1).spirv();
             double ms = (System.nanoTime() - t0) / 1e6;
             // Values cross the recompile by identity: a parameter that survived the edit keeps what it was
             // holding even if it moved slot, and one the edit removed simply drops (R4's rule, and the reason
             // ParamBlock publishes a writer rather than an offset).
-            ParamBlock carried = SdfComposer.paramBlock(next);
+            ParamBlock carried = SdfComposer.paramBlock(next, road);
             ParamBlock previous = this.params;
             if (previous != null) {
                 carried.carryFrom(previous);
             }
             this.scene = next;
             this.params = carried;
-            this.pushBytes = SdfComposer.pushBytes(next);
+            this.composedBacking = road;
+            this.pushBytes = SdfComposer.pushBytes(next, road);
             this.fragmentSpirv = fs;
             this.vertexSpirv = vs;
             this.sceneDirty = true;
@@ -432,8 +470,18 @@ final class Viewport {
             return;
         }
         frameDirty = false;
-        SdfScene.Rgb bg = sky;
-        target.renderInto(pipeline, 0L, 0L, 3, pushConstantBytes((double) w / h),
+        Surface.Rgb bg = sky;
+        // The values, where this shader looks for them. Safe here and nowhere else: renderInto waits on its
+        // own fence before returning, so the previous march has finished reading the buffer by the time the
+        // next one rewrites it. The day that wait goes, this needs N-buffering behind ParamBlock — which is
+        // the third reason that class publishes a writer rather than an offset.
+        long paramSet = 0L;
+        ParamBlock values = params;
+        if (paramBuffer != null && values != null) {
+            paramBuffer.update(values.floats(), values.size());
+            paramSet = paramBuffer.descriptorSet();
+        }
+        target.renderInto(pipeline, 0L, paramSet, 3, pushConstantBytes((double) w / h),
                 (float) bg.r(), (float) bg.g(), (float) bg.b(), 1f);
         // Announced only after the submission returns. renderInto waits for its own work, so by here the image
         // really is in SHADER_READ_ONLY and the next presented frame samples it. Announcing before the call
@@ -470,7 +518,29 @@ final class Viewport {
         // minted at shutdown, and close() is not idempotent.
         target = live.viewport(w, h);
         canvas.image(target);
+        askTheDevice();
         return true;
+    }
+
+    /**
+     * Read what this device reports for {@code maxPushConstantsSize}, once a target has brought one.
+     *
+     * <p>The first compose happens before any of this — it may well precede the first frame — so it assumes
+     * Vulkan's guaranteed floor, which is never wrong and is often modest: the floor holds 25 parameters and
+     * the machine this was written on holds 57. When the real number turns out to be larger, one more compose
+     * is asked for, and every one after that takes the faster road while it fits.
+     */
+    private void askTheDevice() {
+        ParamBacking asked = ParamBacking.on(target.device().maxPushConstantBytes());
+        if (asked.equals(backing)) {
+            return;
+        }
+        backing = asked;
+        status.accept(String.format("%d push-constant bytes here: %d parameters before the buffer",
+                asked.maxPushConstantBytes(), asked.pushConstantCapacity()));
+        if (scene != null) {
+            show(scene.surface());              // recompose on the road this device actually wants
+        }
     }
 
     private boolean ensurePipeline(byte[] vs, byte[] fs) {
@@ -483,8 +553,33 @@ final class Viewport {
             // samples the image this pipeline drew into.
             pipeline.close();
         }
-        pipeline = target.pipelineFor(vs, "main", fs, "main", pushBytes);
+        pipeline = target.pipelineFor(vs, "main", fs, "main", pushBytes, ensureParamBuffer());
         return true;
+    }
+
+    /**
+     * The descriptor set layouts this scene's pipeline needs: the parameter buffer's, or none.
+     *
+     * <p>Minted only when a design outgrows the push-constant block, and sized generously — growing past the
+     * capacity means a new buffer <em>and</em> a new pipeline, since the pipeline was built against this
+     * layout, so it is worth not doing that per slider.
+     */
+    private long[] ensureParamBuffer() {
+        ParamBlock values = params;
+        int needed = values == null ? 0 : values.size();
+        if (!composedBacking.usesBuffer(needed)) {
+            return new long[0];                 // the push road: no descriptor, nothing to bind
+        }
+        if (paramBuffer == null || paramBuffer.capacityFloats() < needed) {
+            StorageBuffer superseded = paramBuffer;
+            paramBuffer = new StorageBuffer(target.device(), Math.max(256, needed * 2), PARAM_BINDING);
+            if (superseded != null) {
+                // Safe for the same reason the pipeline's replacement is: renderInto waited for the last
+                // submission that could have been reading it.
+                superseded.close();
+            }
+        }
+        return new long[]{paramBuffer.descriptorSetLayout()};
     }
 
     /**
