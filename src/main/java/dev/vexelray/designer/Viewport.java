@@ -25,6 +25,11 @@ import dev.vexelray.technique.sdf.SdfScene;
 import dev.vexelray.vulkan.present.GraphicsPipeline;
 import dev.vexelray.vulkan.present.SampledColorTarget;
 import dev.vexelray.vulkan.present.StorageBuffer;
+import sibarum.atchung.Atchung;
+import sibarum.atchung.Backpressure;
+import sibarum.atchung.Pump;
+import sibarum.atchung.Subscription;
+import sibarum.atchung.Topic;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -119,6 +124,14 @@ final class Viewport {
     private static final double GRID_STEP = 1.0;
 
     private final Gui gui;
+    /**
+     * The application.s bus, which is not {@code gui.bus()}.
+     *
+     * <p>The viewport window.s {@code Gui} keeps a bus of its own because two trees cannot share one -- see
+     * {@code Gui(Atchung)}. A component is not a tree, so its mailbox belongs on the application.s bus, where
+     * an edit is a message anything else in the application can see rather than a queue private to one window.
+     */
+    private final Atchung bus;
     private final Node canvas;
     private final Consumer<String> status;
 
@@ -148,21 +161,39 @@ final class Viewport {
     private final AtomicInteger revision = new AtomicInteger();
 
     /**
-     * The compose component: one thread, one mailbox, latest wins.
+     * The compose component: one thread, one mailbox on the bus, latest wins.
      *
      * <p>Lowering and SPIR-V generation is where the cost is and none of it touches the GPU, so it is the work
      * that belongs off the frame thread — and having it on a thread of its own rather than on a pool is what
-     * makes two composes impossible rather than unlikely. See {@link Mailbox}.
+     * makes two composes impossible rather than unlikely.
+     *
+     * <p><b>The mailbox is the bus's</b>, which is the whole point of putting it there: an edit is an ordinary
+     * message on an ordinary topic, so it can be watched on a debug port, scripted, or one day published from
+     * another process, none of which a private queue could ever be. {@code COALESCE_LATEST} is the policy by
+     * name rather than by convention, and its capacity <em>is</em> one — a scene edit is a sample, because the
+     * next edit supersedes it.
+     *
+     * <p>What is still the application's is the thread and the loop it runs: the bus owns the mailbox, the
+     * waiting and the wake, and something has to own the thread that does the waiting.
      */
-    private final Mailbox<Edit> composer;
+    private final Pump pump;
+    private final Subscription edits;
+    private final Thread composer;
+    private volatile boolean composing = true;
+
+    /** How long the compose thread parks before looking again. A ceiling on shutdown, not a poll interval. */
+    private static final long PARK_NANOS = 500_000_000L;
+
+    /** The topic an edit travels on. Named for the component, because that is what a debug port will show. */
+    private static final Topic<Edit> EDITS = Topic.of("designer.viewport.edit", Edit.class);
 
     /**
      * One request to show a design.
      *
-     * <p>A record rather than a bare {@code Surface} because the mailbox reads {@code null} as "nothing
-     * waiting", and an empty design is a real request that has to be told apart from no request at all.
+     * <p>A record rather than a bare {@code Surface} because an empty design is a real request — a picture of
+     * nothing — and has to be told apart from the absence of one.
      */
-    private record Edit(Surface surface, boolean empty) {
+    record Edit(Surface surface, boolean empty) {
     }
 
     /**
@@ -200,9 +231,10 @@ final class Viewport {
     private Camera camera = Camera.DEFAULT;
     private double distance = BASE_DISTANCE;
 
-    Viewport(Gui gui, Consumer<String> status) {
+    Viewport(Gui gui, Atchung bus, Consumer<String> status) {
         this.gui = gui;
         this.status = status;
+        this.bus = bus;
         this.canvas = gui.box()
                 .width(Length.FILL).height(Length.grow(1))
                 .background(Color.rgb(0.09f, 0.10f, 0.13f))
@@ -227,8 +259,17 @@ final class Viewport {
             }
         });
         // Last, so nothing the component touches is still half-built when its thread starts. It parks
-        // immediately and cannot run work before something is posted, which nobody can do yet.
-        this.composer = new Mailbox<>("designer-compose", this::composeNow);
+        // immediately and cannot run work before something is published, which nobody can do yet.
+        this.pump = bus.pump();
+        this.edits = pump.subscribe(EDITS, this::composeNow, 1, Backpressure.COALESCE_LATEST);
+        this.composer = Thread.ofPlatform().name("designer-compose").daemon(true).start(() -> {
+            // A platform thread, not a virtual one: a desktop application following Kronometer's advice runs
+            // its timeline kernel on a single carrier, and blocking work placed there is the documented
+            // deadlock rather than a slow path.
+            while (composing) {
+                pump.drain(PARK_NANOS);
+            }
+        });
     }
 
     /**
@@ -279,7 +320,7 @@ final class Viewport {
         // Nothing to march is an ordinary state, not an error, so an empty tree gets a picture of nothing
         // rather than the last design left standing. Substituted here rather than in the component, because
         // the mailbox reads null as an empty slot.
-        composer.post(surface == null
+        bus.publish(EDITS, surface == null
                 ? new Edit(new Surface.Sphere(0, -1e6, 0, 1e-3), true)
                 : new Edit(surface, false));
     }
@@ -312,7 +353,7 @@ final class Viewport {
             // cancels a compose in flight — but applying it would put a design the user has already replaced
             // on screen, and then replace it again a moment later. That flash is what the old latest-wins
             // guard could not prevent, because it checked before composing rather than after.
-            if (composer.superseded()) {
+            if (pump.hasPending()) {
                 publish("superseded");
                 return;
             }
@@ -552,7 +593,15 @@ final class Viewport {
     void close() {
         // The component first: a compose landing after the pipeline is gone would raise dirty flags for a
         // frame that is never coming, and the thread is the thing holding work rather than a GPU resource.
-        composer.close();
+        // Stop, wake, join -- without the wake this waits out whatever park the thread happened to be in.
+        composing = false;
+        pump.wake();
+        try {
+            composer.join(1_000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        edits.close();
         if (pipeline != null) {
             pipeline.close();
             pipeline = null;

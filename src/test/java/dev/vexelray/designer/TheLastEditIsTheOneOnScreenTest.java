@@ -93,7 +93,7 @@ final class TheLastEditIsTheOneOnScreenTest {
 
         List<String> applied = new CopyOnWriteArrayList<>();
         try (Gui gui = new Gui()) {
-            Viewport viewport = new Viewport(gui, applied::add);
+            Viewport viewport = new Viewport(gui, gui.bus(), applied::add);
             try {
                 viewport.show(heavy(2));
                 Thread.sleep(GAP_MS);
@@ -112,7 +112,7 @@ final class TheLastEditIsTheOneOnScreenTest {
     private static String composeOne(Surface surface) throws InterruptedException {
         List<String> applied = new CopyOnWriteArrayList<>();
         try (Gui gui = new Gui()) {
-            Viewport viewport = new Viewport(gui, applied::add);
+            Viewport viewport = new Viewport(gui, gui.bus(), applied::add);
             try {
                 viewport.show(surface);
                 awaitQuiet(applied);

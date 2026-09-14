@@ -21,6 +21,7 @@ import dev.vexelray.gui.widget.TreeView;
 import dev.vexelray.os.Decorations;
 import dev.vexelray.os.WindowConfig;
 import dev.vexelray.surface.Surface;
+import sibarum.atchung.Atchung;
 import sibarum.tactroller.api.Key;
 import sibarum.tactroller.api.Modifier;
 
@@ -133,6 +134,9 @@ final class DesignerWiring extends Wiring {
     @Override
     public void gui(Shell shell) {
         treeGui = shell.gui();
+        // On the application's bus, not one of its own. new Gui() is this(Atchung.create()), so a second
+        // window built that way is a second fabric -- and the viewport's compose component keeps its mailbox
+        // on this bus, which is what makes an edit an ordinary message rather than a private queue.
         viewGui = shell.disposer().register(new Gui());
         shell.appearance().applyTo(viewGui);
     }
@@ -151,7 +155,7 @@ final class DesignerWiring extends Wiring {
      */
     @Override
     public void tree(Shell shell) {
-        buildViewportWindow();
+        buildViewportWindow(shell.bus());
         buildTreeWindow();
         seed();
     }
@@ -279,10 +283,10 @@ final class DesignerWiring extends Wiring {
 
     // --- the viewport window ---
 
-    private void buildViewportWindow() {
+    private void buildViewportWindow(Atchung bus) {
         viewStatus = viewGui.text("").textSize(Length.rem(0.8f))
                 .textColor(viewGui.theme().color(Role.DIM));
-        viewport = new Viewport(viewGui, s -> viewStatus.text(s));
+        viewport = new Viewport(viewGui, bus, s -> viewStatus.text(s));
 
         Node bar = viewGui.row().width(Length.FILL).gap(Length.rem(0.4f))
                 .padding(Length.dp(8))
