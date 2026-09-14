@@ -84,17 +84,14 @@ final class Viewport {
     private static final float GROWTH = 1.35f;
 
     /**
-     * The scene being marched, and the values its parameters currently hold.
+     * The design on screen, as one value.
      *
-     * <p>Both are needed on the render thread and neither is derivable there: the push-constant block is the
-     * camera, the lens and one float per parameter, so its <em>size</em> is a property of the scene and its
-     * contents are a property of what the sliders were last left at. Written by the compose worker before
-     * {@code sceneDirty} is set and read by the frame pump afterwards, which is the same handoff the SPIR-V
-     * uses.
+     * <p>Everything the render thread needs about a compose and cannot derive there: the scene, its parameter
+     * values, the push-constant size, both modules, and the road they took. Written once by the compose
+     * component when a compose lands, and read — <b>once per frame, then passed down</b> — by the pump. See
+     * {@link Composed} for what it replaced and why reading it twice would put that back.
      */
-    private volatile SdfScene scene;
-    private volatile ParamBlock params;
-    private volatile int pushBytes = SdfComposer.CAMERA_BYTES;
+    private volatile Composed current;
 
     /**
      * Which road this device wants the parameters to take, and which one the shader on screen actually took.
@@ -104,10 +101,9 @@ final class Viewport {
      * pump notices when the real number turns out to be larger and asks for one more compose. The second
      * field is what the live pipeline was built for, and is what the frame must be pushed and bound for: they
      * differ for exactly one frame, and pushing the wrong one would be pushing a block the shader does not
-     * have.
+     * have. The second lives in {@link Composed}, with the modules it belongs to.
      */
     private volatile ParamBacking backing = ParamBacking.DEFAULT;
-    private volatile ParamBacking composedBacking = ParamBacking.DEFAULT;
 
     /**
      * The parameters, when they travel by buffer rather than by push constant.
@@ -130,8 +126,6 @@ final class Viewport {
     private SampledColorTarget target;
     private GraphicsPipeline pipeline;
 
-    private volatile byte[] vertexSpirv;
-    private volatile byte[] fragmentSpirv;
     private volatile Surface.Rgb sky = new Surface.Rgb(0.09, 0.10, 0.13);
 
     private volatile boolean sceneDirty;
@@ -142,8 +136,44 @@ final class Viewport {
     /** Whether the first marched frame has been reported &mdash; a windowed frame cannot be photographed here. */
     private boolean announced;
 
-    /** Latest-wins guard, so a burst of edits composes once rather than a dozen times. */
+    /**
+     * The edit number a driver reads, and <b>not</b> a coalescing guard any more.
+     *
+     * <p>It was both, which is why the note is worth leaving: incrementing it used to double as the latest-wins
+     * check, and the check was made before a compose started rather than around it. Coalescing now belongs to
+     * the mailbox, where capacity one is the policy rather than a convention. What is left here is the number
+     * {@link #publish} announces, which {@code docs/driving-the-viewport.md} records a driver getting wrong
+     * three times running when it waited on a phase without one.
+     */
     private final AtomicInteger revision = new AtomicInteger();
+
+    /**
+     * The compose component: one thread, one mailbox, latest wins.
+     *
+     * <p>Lowering and SPIR-V generation is where the cost is and none of it touches the GPU, so it is the work
+     * that belongs off the frame thread — and having it on a thread of its own rather than on a pool is what
+     * makes two composes impossible rather than unlikely. See {@link Mailbox}.
+     */
+    private final Mailbox<Edit> composer;
+
+    /**
+     * One request to show a design.
+     *
+     * <p>A record rather than a bare {@code Surface} because the mailbox reads {@code null} as "nothing
+     * waiting", and an empty design is a real request that has to be told apart from no request at all.
+     */
+    private record Edit(Surface surface, boolean empty) {
+    }
+
+    /**
+     * What to call when a compose lands — the wake this component owes the frame loop.
+     *
+     * <p>A compose finishing is work the loop cannot predict, which is {@code WakeSource}'s definition
+     * exactly. It was previously covered by accident: announcing the phase writes to a {@code Node}, a node
+     * mutation wakes the loop, and so a frame followed. That is a real wake hanging on an unrelated line, and
+     * a compose that stopped announcing would have parked the window instead. See {@link #onWork}.
+     */
+    private volatile Runnable wake = () -> { };
 
     /**
      * The machine-readable state of the view: an invisible node whose <b>name is the phase</b>, as
@@ -196,6 +226,19 @@ final class Viewport {
                 zoom(s.yOffset() > 0 ? 1 : -1);
             }
         });
+        // Last, so nothing the component touches is still half-built when its thread starts. It parks
+        // immediately and cannot run work before something is posted, which nobody can do yet.
+        this.composer = new Mailbox<>("designer-compose", this::composeNow);
+    }
+
+    /**
+     * The wake seam: {@code shell.wake(viewport::onWork)} in the wiring.
+     *
+     * <p>Shaped as {@code WakeSource.onWake} because that is what it is — a component telling the loop how to
+     * be told that work it could not predict has arrived.
+     */
+    void onWork(Runnable onWork) {
+        this.wake = onWork == null ? () -> { } : onWork;
     }
 
     Node node() {
@@ -231,22 +274,19 @@ final class Viewport {
      * and none of it touches the GPU. Null is an empty design and draws the sky.
      */
     void show(Surface surface) {
-        int mine = revision.incrementAndGet();
+        revision.incrementAndGet();
         publish("requested");
-        gui.async(() -> {
-            if (revision.get() == mine) {
-                showNow(surface);
-            }
-        });
+        // Nothing to march is an ordinary state, not an error, so an empty tree gets a picture of nothing
+        // rather than the last design left standing. Substituted here rather than in the component, because
+        // the mailbox reads null as an empty slot.
+        composer.post(surface == null
+                ? new Edit(new Surface.Sphere(0, -1e6, 0, 1e-3), true)
+                : new Edit(surface, false));
     }
 
-    private void showNow(Surface surface) {
-        if (surface == null) {
-            // Nothing to march. An empty tree is an ordinary state, not an error, so it gets a picture of
-            // nothing rather than the last design left standing.
-            surface = new Surface.Sphere(0, -1e6, 0, 1e-3);
-            report = "empty";
-        }
+    /** <b>Compose thread only.</b> One design, lowered and composed, and applied unless already superseded. */
+    private void composeNow(Edit edit) {
+        Surface surface = edit.surface();
         try {
             long t0 = System.nanoTime();
             SdfScene next = new SdfScene(surface, Shadings.defaultKeyLight(), MarchSettings.DEFAULT,
@@ -264,22 +304,28 @@ final class Viewport {
             // holding even if it moved slot, and one the edit removed simply drops (R4's rule, and the reason
             // ParamBlock publishes a writer rather than an offset).
             ParamBlock carried = SdfComposer.paramBlock(next, road);
-            ParamBlock previous = this.params;
-            if (previous != null) {
-                carried.carryFrom(previous);
+            Composed previous = this.current;
+            if (previous != null && previous.params() != null) {
+                carried.carryFrom(previous.params());
             }
-            this.scene = next;
-            this.params = carried;
-            this.composedBacking = road;
-            this.pushBytes = SdfComposer.pushBytes(next, road);
-            this.fragmentSpirv = fs;
-            this.vertexSpirv = vs;
+            // A result already known to be stale is not shown. The work cannot be taken back — nothing here
+            // cancels a compose in flight — but applying it would put a design the user has already replaced
+            // on screen, and then replace it again a moment later. That flash is what the old latest-wins
+            // guard could not prevent, because it checked before composing rather than after.
+            if (composer.superseded()) {
+                publish("superseded");
+                return;
+            }
+            report = edit.empty() ? "empty" : String.format("%,d B in %.0f ms", fs.length, ms);
+            // One write, one set of facts. See Composed.
+            this.current = new Composed(next, carried, SdfComposer.pushBytes(next, road), vs, fs, road, report);
             this.sceneDirty = true;
             this.frameDirty = true;
-            report = String.format("%,d B in %.0f ms", fs.length, ms);
             publish("composed " + fs.length);
             System.out.println("composed: " + report);
             status.accept(report);
+            // The wake this component owes: a compose landing is work the loop had no way to predict.
+            wake.run();
         } catch (Throwable t) {
             // A surface too large to lower is the six-operator ceiling (R2), and it is a thing a user will hit
             // by stacking modifiers. Say so and keep the last good picture rather than dying.
@@ -451,9 +497,10 @@ final class Viewport {
     /** March one frame if anything asked for one. <b>Render thread only.</b> */
     void pump() {
         GuiApp live = app;
-        byte[] vs = vertexSpirv;
-        byte[] fs = fragmentSpirv;
-        if (live == null || vs == null || fs == null) {
+        // Read once, then passed down. A helper that read the field again could be handed a different compose
+        // than the one this frame decided to draw, which is the whole failure Composed exists to end.
+        Composed shown = current;
+        if (live == null || shown == null) {
             return;
         }
         Rect box = canvas.layout().content();
@@ -463,7 +510,7 @@ final class Viewport {
             return;                                   // not laid out yet; the next frame will find it
         }
         boolean fresh = ensureTarget(live, w, h);
-        if (ensurePipeline(vs, fs) || fresh) {
+        if (ensurePipeline(shown) || fresh) {
             frameDirty = true;
         }
         if (!frameDirty || pipeline == null || target == null) {
@@ -476,12 +523,12 @@ final class Viewport {
         // next one rewrites it. The day that wait goes, this needs N-buffering behind ParamBlock — which is
         // the third reason that class publishes a writer rather than an offset.
         long paramSet = 0L;
-        ParamBlock values = params;
+        ParamBlock values = shown.params();
         if (paramBuffer != null && values != null) {
             paramBuffer.update(values.floats(), values.size());
             paramSet = paramBuffer.descriptorSet();
         }
-        target.renderInto(pipeline, 0L, paramSet, 3, pushConstantBytes((double) w / h),
+        target.renderInto(pipeline, 0L, paramSet, 3, pushConstantBytes(shown, (double) w / h),
                 (float) bg.r(), (float) bg.g(), (float) bg.b(), 1f);
         // Announced only after the submission returns. renderInto waits for its own work, so by here the image
         // really is in SHADER_READ_ONLY and the next presented frame samples it. Announcing before the call
@@ -503,6 +550,9 @@ final class Viewport {
      * closes them all, and {@code SampledColorTarget.close()} is not idempotent.
      */
     void close() {
+        // The component first: a compose landing after the pipeline is gone would raise dirty flags for a
+        // frame that is never coming, and the thread is the thing holding work rather than a GPU resource.
+        composer.close();
         if (pipeline != null) {
             pipeline.close();
             pipeline = null;
@@ -538,12 +588,13 @@ final class Viewport {
         backing = asked;
         status.accept(String.format("%d push-constant bytes here: %d parameters before the buffer",
                 asked.maxPushConstantBytes(), asked.pushConstantCapacity()));
-        if (scene != null) {
-            show(scene.surface());              // recompose on the road this device actually wants
+        Composed shown = current;
+        if (shown != null) {
+            show(shown.scene().surface());      // recompose on the road this device actually wants
         }
     }
 
-    private boolean ensurePipeline(byte[] vs, byte[] fs) {
+    private boolean ensurePipeline(Composed shown) {
         if (!sceneDirty && pipeline != null) {
             return false;
         }
@@ -553,7 +604,8 @@ final class Viewport {
             // samples the image this pipeline drew into.
             pipeline.close();
         }
-        pipeline = target.pipelineFor(vs, "main", fs, "main", pushBytes, ensureParamBuffer());
+        pipeline = target.pipelineFor(shown.vertexSpirv(), "main", shown.fragmentSpirv(), "main",
+                shown.pushBytes(), ensureParamBuffer(shown));
         return true;
     }
 
@@ -564,10 +616,10 @@ final class Viewport {
      * capacity means a new buffer <em>and</em> a new pipeline, since the pipeline was built against this
      * layout, so it is worth not doing that per slider.
      */
-    private long[] ensureParamBuffer() {
-        ParamBlock values = params;
+    private long[] ensureParamBuffer(Composed shown) {
+        ParamBlock values = shown.params();
         int needed = values == null ? 0 : values.size();
-        if (!composedBacking.usesBuffer(needed)) {
+        if (!shown.backing().usesBuffer(needed)) {
             return new long[0];                 // the push road: no descriptor, nothing to bind
         }
         if (paramBuffer == null || paramBuffer.capacityFloats() < needed) {
@@ -589,7 +641,8 @@ final class Viewport {
      * is the point of the stage this method belongs to, and the reason it is this short.
      */
     void setParam(ParamId id, double value) {
-        ParamBlock block = params;
+        Composed shown = current;
+        ParamBlock block = shown == null ? null : shown.params();
         if (block == null || !block.holds(id)) {
             return;                                   // the edit that removed it got here first
         }
@@ -599,11 +652,12 @@ final class Viewport {
 
     /** The parameters of the surface on screen, in slot order — what a panel builds sliders from. */
     List<Scalar.Param> parameters() {
-        ParamBlock block = params;
+        Composed shown = current;
+        ParamBlock block = shown == null ? null : shown.params();
         return block == null ? List.of() : block.params();
     }
 
-    private byte[] pushConstantBytes(double aspect) {
+    private byte[] pushConstantBytes(Composed shown, double aspect) {
         double yaw;
         double pitch;
         double[] eye;
@@ -612,6 +666,7 @@ final class Viewport {
             pitch = camera.pitch();
             eye = worldEye();
         }
-        return SdfComposer.pushConstantBytes(scene, eye[0], eye[1], eye[2], yaw, pitch, aspect, params);
+        return SdfComposer.pushConstantBytes(shown.scene(), eye[0], eye[1], eye[2], yaw, pitch, aspect,
+                shown.params());
     }
 }

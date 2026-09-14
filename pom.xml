@@ -23,6 +23,7 @@
         <vexelray.version>0.1.0-SNAPSHOT</vexelray.version>
         <tactroller.version>1.0-SNAPSHOT</tactroller.version>
         <vexelray-framework.version>0.1.0-SNAPSHOT</vexelray-framework.version>
+        <junit.version>5.11.4</junit.version>
 
         <app.mainClass>dev.vexelray.designer.DesignerApp</app.mainClass>
         <!-- Program args for exec:exec (one token each; empty = interactive). -->
@@ -123,6 +124,15 @@
             <artifactId>tactroller-clipboard</artifactId>
             <version>${tactroller.version}</version>
         </dependency>
+
+        <!-- The first tests this application has had. The ones that matter here need no device: composition
+             is pure CPU, which is the whole reason it is the thing that moves off the frame thread. -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
@@ -135,6 +145,11 @@
                     <target>${maven.compiler.release}</target>
                     <release>${maven.compiler.release}</release>
                 </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.2</version>
             </plugin>
             <!-- Run: mvn compile exec:exec ; a bounded run that exits on its own: mvn compile exec:exec "-Dapp.args=3" -->
             <plugin>

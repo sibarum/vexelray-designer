@@ -197,6 +197,11 @@ final class DesignerWiring extends Wiring {
         // application's own per-frame work, and it runs after the framework's input pump, which is the order
         // the hand-written frame lambda had.
         shell.hooks().add(FrameStage.APP, viewport::pump);
+        // The wake the compose component owes the loop. A compose finishes on a thread of its own, so the
+        // frame it makes necessary is work the loop had no way to predict -- WakeSource's definition exactly.
+        // It was covered by accident before: announcing the phase writes to a Node, a node mutation wakes the
+        // loop, and so a frame followed. That made a real wake depend on an unrelated line of reporting.
+        shell.wake(viewport::onWork);
         // Registered after the GuiApp, so it closes before it: the loop has stopped by then, so this is still
         // the render thread and nothing else holds the pipeline. Without it the probe's ledger reports one
         // GraphicsPipeline live at exit.
