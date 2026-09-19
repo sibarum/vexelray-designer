@@ -340,8 +340,10 @@ final class Viewport {
             publish("composed " + fs.length);
             System.out.println("composed: " + report);
             status.accept(report);
-            // The wake this component owes: a compose landing is work the loop had no way to predict.
-            compose.published();
+            // No wake call here, and none anywhere else in this class. A compose landing is work the loop had
+            // no way to predict, and the placement wakes it because a delivery ran -- which covers the two
+            // paths below as well, where this component decides to show nothing and a frame is owed anyway
+            // for whatever the status line just said.
         } catch (Throwable t) {
             // A surface too large to lower is the six-operator ceiling (R2), and it is a thing a user will hit
             // by stacking modifiers. Say so and keep the last good picture rather than dying.
