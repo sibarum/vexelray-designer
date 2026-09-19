@@ -4,6 +4,7 @@ import dev.vexelray.framework.api.FrameStage;
 import dev.vexelray.framework.automation.Driver;
 import dev.vexelray.framework.shell.AppInfo;
 import dev.vexelray.framework.shell.Appearance;
+import dev.vexelray.framework.shell.Placement;
 import dev.vexelray.framework.shell.Shell;
 import dev.vexelray.framework.shell.Wiring;
 import dev.vexelray.gui.automation.Automation;
@@ -155,7 +156,10 @@ final class DesignerWiring extends Wiring {
      */
     @Override
     public void tree(Shell shell) {
-        buildViewportWindow(shell.bus());
+        // The compose component: placed here, started by the framework once every publisher exists. The
+        // thread, the drain loop, the wake and the drain-then-stop are all the container.s now -- this line
+        // and the subscribe inside Viewport are what is left of what used to be thirty lines in that class.
+        buildViewportWindow(shell.bus(), shell.place("compose"));
         buildTreeWindow();
         seed();
     }
@@ -201,11 +205,12 @@ final class DesignerWiring extends Wiring {
         // application's own per-frame work, and it runs after the framework's input pump, which is the order
         // the hand-written frame lambda had.
         shell.hooks().add(FrameStage.APP, viewport::pump);
-        // The wake the compose component owes the loop. A compose finishes on a thread of its own, so the
-        // frame it makes necessary is work the loop had no way to predict -- WakeSource's definition exactly.
-        // It was covered by accident before: announcing the phase writes to a Node, a node mutation wakes the
-        // loop, and so a frame followed. That made a real wake depend on an unrelated line of reporting.
-        shell.wake(viewport::onWork);
+        // No wake line here any more, and its absence is the point. A compose finishes on a thread of its own,
+        // so the frame it makes necessary is work the loop had no way to predict -- WakeSource's definition
+        // exactly -- and this used to be `shell.wake(viewport::onWork)`, one line per component that could be
+        // left out with no symptom until somebody dragged a slider. A Placement is a WakeSource, connected by
+        // the container when it starts the component, so there is nothing here to forget.
+        //
         // Registered after the GuiApp, so it closes before it: the loop has stopped by then, so this is still
         // the render thread and nothing else holds the pipeline. Without it the probe's ledger reports one
         // GraphicsPipeline live at exit.
@@ -283,10 +288,10 @@ final class DesignerWiring extends Wiring {
 
     // --- the viewport window ---
 
-    private void buildViewportWindow(Atchung bus) {
+    private void buildViewportWindow(Atchung bus, Placement compose) {
         viewStatus = viewGui.text("").textSize(Length.rem(0.8f))
                 .textColor(viewGui.theme().color(Role.DIM));
-        viewport = new Viewport(viewGui, bus, s -> viewStatus.text(s));
+        viewport = new Viewport(viewGui, bus, compose, s -> viewStatus.text(s));
 
         Node bar = viewGui.row().width(Length.FILL).gap(Length.rem(0.4f))
                 .padding(Length.dp(8))

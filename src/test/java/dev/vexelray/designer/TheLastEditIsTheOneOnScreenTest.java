@@ -1,5 +1,7 @@
 package dev.vexelray.designer;
 
+import dev.vexelray.framework.core.Lanes;
+import dev.vexelray.framework.shell.Placement;
 import dev.vexelray.gui.core.Gui;
 import dev.vexelray.surface.Surface;
 import org.junit.jupiter.api.Test;
@@ -92,8 +94,15 @@ final class TheLastEditIsTheOneOnScreenTest {
                         + "the " + GAP_MS + "ms gap, so the two composes never overlapped. Raise HEAVY.");
 
         List<String> applied = new CopyOnWriteArrayList<>();
-        try (Gui gui = new Gui()) {
-            Viewport viewport = new Viewport(gui, gui.bus(), applied::add);
+        // A component without an application: its own lanes, its own placement, a real thread and a real
+        // mailbox on a real bus. The container owns both in a running designer; what is under test here is
+        // the component, which is why Placement is constructible without one.
+        try (Gui gui = new Gui(); Lanes lanes = new Lanes()) {
+            Placement compose = new Placement("compose", gui.bus(), lanes);
+            Viewport viewport = new Viewport(gui, gui.bus(), compose, applied::add);
+            // Constructed, then started -- the same two moments the container keeps apart, because a mailbox
+            // must not pump before the things that publish to it exist.
+            compose.start();
             try {
                 viewport.show(heavy(2));
                 Thread.sleep(GAP_MS);
@@ -111,8 +120,12 @@ final class TheLastEditIsTheOneOnScreenTest {
     /** One design, composed alone, and what it reported. */
     private static String composeOne(Surface surface) throws InterruptedException {
         List<String> applied = new CopyOnWriteArrayList<>();
-        try (Gui gui = new Gui()) {
-            Viewport viewport = new Viewport(gui, gui.bus(), applied::add);
+        try (Gui gui = new Gui(); Lanes lanes = new Lanes()) {
+            Placement compose = new Placement("compose", gui.bus(), lanes);
+            Viewport viewport = new Viewport(gui, gui.bus(), compose, applied::add);
+            // Constructed, then started -- the same two moments the container keeps apart, because a mailbox
+            // must not pump before the things that publish to it exist.
+            compose.start();
             try {
                 viewport.show(surface);
                 awaitQuiet(applied);

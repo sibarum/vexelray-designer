@@ -1,6 +1,7 @@
 package dev.vexelray.designer;
 
 import dev.vexelray.canvas.Color;
+import dev.vexelray.framework.shell.Placement;
 import dev.vexelray.gui.core.Gui;
 import dev.vexelray.gui.core.Node;
 import dev.vexelray.gui.core.app.GuiApp;
@@ -27,8 +28,6 @@ import dev.vexelray.vulkan.present.SampledColorTarget;
 import dev.vexelray.vulkan.present.StorageBuffer;
 import sibarum.atchung.Atchung;
 import sibarum.atchung.Backpressure;
-import sibarum.atchung.Pump;
-import sibarum.atchung.Subscription;
 import sibarum.atchung.Topic;
 
 import java.util.List;
@@ -173,16 +172,14 @@ final class Viewport {
      * name rather than by convention, and its capacity <em>is</em> one — a scene edit is a sample, because the
      * next edit supersedes it.
      *
-     * <p>What is still the application's is the thread and the loop it runs: the bus owns the mailbox, the
-     * waiting and the wake, and something has to own the thread that does the waiting.
+     * <p><b>The thread is the framework's now.</b> This used to own it — a platform thread, a park interval, a
+     * {@code composing} flag and a stop-wake-join in {@code close} — with the note that <i>"the bus owns the
+     * mailbox, the waiting and the wake, and something has to own the thread that does the waiting."</i>
+     * {@code Shell.place} is that something. What is left here is the work, which is all this class ever
+     * wanted to be about: the mailbox is declared where the component is placed, the wake comes with the
+     * placement rather than being wired by hand, and the stop is drain-then-stop without this file saying so.
      */
-    private final Pump pump;
-    private final Subscription edits;
-    private final Thread composer;
-    private volatile boolean composing = true;
-
-    /** How long the compose thread parks before looking again. A ceiling on shutdown, not a poll interval. */
-    private static final long PARK_NANOS = 500_000_000L;
+    private final Placement compose;
 
     /** The topic an edit travels on. Named for the component, because that is what a debug port will show. */
     private static final Topic<Edit> EDITS = Topic.of("designer.viewport.edit", Edit.class);
@@ -195,16 +192,6 @@ final class Viewport {
      */
     record Edit(Surface surface, boolean empty) {
     }
-
-    /**
-     * What to call when a compose lands — the wake this component owes the frame loop.
-     *
-     * <p>A compose finishing is work the loop cannot predict, which is {@code WakeSource}'s definition
-     * exactly. It was previously covered by accident: announcing the phase writes to a {@code Node}, a node
-     * mutation wakes the loop, and so a frame followed. That is a real wake hanging on an unrelated line, and
-     * a compose that stopped announcing would have parked the window instead. See {@link #onWork}.
-     */
-    private volatile Runnable wake = () -> { };
 
     /**
      * The machine-readable state of the view: an invisible node whose <b>name is the phase</b>, as
@@ -231,10 +218,11 @@ final class Viewport {
     private Camera camera = Camera.DEFAULT;
     private double distance = BASE_DISTANCE;
 
-    Viewport(Gui gui, Atchung bus, Consumer<String> status) {
+    Viewport(Gui gui, Atchung bus, Placement compose, Consumer<String> status) {
         this.gui = gui;
         this.status = status;
         this.bus = bus;
+        this.compose = compose;
         this.canvas = gui.box()
                 .width(Length.FILL).height(Length.grow(1))
                 .background(Color.rgb(0.09f, 0.10f, 0.13f))
@@ -258,28 +246,15 @@ final class Viewport {
                 zoom(s.yOffset() > 0 ? 1 : -1);
             }
         });
-        // Last, so nothing the component touches is still half-built when its thread starts. It parks
-        // immediately and cannot run work before something is published, which nobody can do yet.
-        this.pump = bus.pump();
-        this.edits = pump.subscribe(EDITS, this::composeNow, 1, Backpressure.COALESCE_LATEST);
-        this.composer = Thread.ofPlatform().name("designer-compose").daemon(true).start(() -> {
-            // A platform thread, not a virtual one: a desktop application following Kronometer's advice runs
-            // its timeline kernel on a single carrier, and blocking work placed there is the documented
-            // deadlock rather than a slow path.
-            while (composing) {
-                pump.drain(PARK_NANOS);
-            }
-        });
-    }
-
-    /**
-     * The wake seam: {@code shell.wake(viewport::onWork)} in the wiring.
-     *
-     * <p>Shaped as {@code WakeSource.onWake} because that is what it is — a component telling the loop how to
-     * be told that work it could not predict has arrived.
-     */
-    void onWork(Runnable onWork) {
-        this.wake = onWork == null ? () -> { } : onWork;
+        // The mailbox, declared here and pumped by the framework. COALESCE_LATEST with capacity one because a
+        // scene edit is a sample: the next edit supersedes this one, so dropping it costs nothing that could
+        // still have been drawn.
+        //
+        // This no longer has to be the last line of the constructor. It used to, with the note "last, so
+        // nothing the component touches is still half-built when its thread starts" -- a real ordering rule
+        // enforced by where one line happened to sit. Nothing starts until the framework starts every
+        // component together, after the wiring has finished, so the rule is kept somewhere it can be.
+        compose.subscribe(EDITS, this::composeNow, 1, Backpressure.COALESCE_LATEST);
     }
 
     Node node() {
@@ -353,7 +328,7 @@ final class Viewport {
             // cancels a compose in flight — but applying it would put a design the user has already replaced
             // on screen, and then replace it again a moment later. That flash is what the old latest-wins
             // guard could not prevent, because it checked before composing rather than after.
-            if (pump.hasPending()) {
+            if (compose.superseded()) {
                 publish("superseded");
                 return;
             }
@@ -366,7 +341,7 @@ final class Viewport {
             System.out.println("composed: " + report);
             status.accept(report);
             // The wake this component owes: a compose landing is work the loop had no way to predict.
-            wake.run();
+            compose.published();
         } catch (Throwable t) {
             // A surface too large to lower is the six-operator ceiling (R2), and it is a thing a user will hit
             // by stacking modifiers. Say so and keep the last good picture rather than dying.
@@ -591,17 +566,13 @@ final class Viewport {
      * closes them all, and {@code SampledColorTarget.close()} is not idempotent.
      */
     void close() {
-        // The component first: a compose landing after the pipeline is gone would raise dirty flags for a
-        // frame that is never coming, and the thread is the thing holding work rather than a GPU resource.
-        // Stop, wake, join -- without the wake this waits out whatever park the thread happened to be in.
-        composing = false;
-        pump.wake();
-        try {
-            composer.join(1_000);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-        edits.close();
+        // The component first, and that is why this closes its own placement rather than leaving it to the
+        // container: a compose landing after the pipeline is gone would raise dirty flags for a frame that is
+        // never coming. Only this class knows the pipeline is the resource its own thread touches, so only
+        // this class can put the two in the right order. Placement.close is idempotent, so the container's
+        // own close at shutdown is then a no-op -- and it is still drain-then-stop, which this used to spell
+        // out as a stop-wake-join.
+        compose.close();
         if (pipeline != null) {
             pipeline.close();
             pipeline = null;
